@@ -1,10 +1,13 @@
 import os
-import re
+import time
 import requests
+from datetime import datetime, timezone
+
 from openai import OpenAI
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = os.getenv("SIGNAL_CHAT_ID")
+UW_API_KEY = os.getenv("UW_API_KEY")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
 if not BOT_TOKEN:
@@ -13,186 +16,117 @@ if not BOT_TOKEN:
 if not CHAT_ID:
     raise ValueError("SIGNAL_CHAT_ID is missing")
 
-if not OPENAI_API_KEY:
-    raise ValueError("OPENAI_API_KEY is missing")
+if not UW_API_KEY:
+    raise ValueError("UW_API_KEY is missing")
 
-client = OpenAI(api_key=OPENAI_API_KEY)
+# OpenAI optional
+client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
+
+TELEGRAM_URL = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+UW_FLOW_ALERTS_URL = "https://api.unusualwhales.com/api/option-trades/flow-alerts"
+
+POLL_SECONDS = 20
+
+# Quiet Alpha filter
+TARGET_TICKER = "SPXW"
+MIN_PREMIUM = 200_000
+MIN_SIZE = 150
+MIN_VOLUME = 300
+MIN_OPEN_INTEREST = 500
+MIN_VOL_OI_RATIO = 1.0
+MIN_PRICE = 0.5
+MAX_PRICE = 20.0
+MIN_DTE = 0
+MAX_DTE = 1
+LIMIT = 100
+
+# In-memory dedupe for this process
+seen_ids = set()
 
 
-def telegram_send(text: str):
-    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+def telegram_send(text: str) -> None:
     payload = {
         "chat_id": CHAT_ID,
         "text": text,
     }
-    r = requests.post(url, json=payload, timeout=30)
+    r = requests.post(TELEGRAM_URL, json=payload, timeout=30)
     r.raise_for_status()
     data = r.json()
     if not data.get("ok"):
         raise RuntimeError(f"Telegram API error: {data}")
 
 
-def parse_contract(text: str):
-    text = text.upper()
-    side = "CALL" if "CALL" in text else "PUT" if "PUT" in text else "UNKNOWN"
-    strike_match = re.search(r"\b(\d{3,5})\b(?=\s+(CALL|PUT))", text)
-    strike = strike_match.group(1) if strike_match else "N/A"
-    symbol = "SPXW" if "SPXW" in text else "SPX"
-    dte_label = "0DTE" if symbol == "SPXW" else "1DTE"
-    return symbol, side, strike, dte_label
+def parse_float(value, default=0.0) -> float:
+    try:
+        if value is None or value == "":
+            return float(default)
+        return float(value)
+    except (TypeError, ValueError):
+        return float(default)
 
 
-def premium_score(premium: float) -> int:
-    if premium >= 500000:
-        return 25
-    if premium >= 300000:
-        return 20
-    if premium >= 200000:
-        return 14
-    if premium >= 100000:
-        return 8
-    return 0
+def parse_int(value, default=0) -> int:
+    try:
+        if value is None or value == "":
+            return int(default)
+        return int(float(value))
+    except (TypeError, ValueError):
+        return int(default)
 
 
-def size_score(size: float) -> int:
-    if size >= 1000:
-        return 15
-    if size >= 500:
-        return 10
-    if size >= 200:
-        return 6
-    return 0
+def parse_created_at(value: str) -> datetime | None:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
 
 
-def oi_score(open_interest: float) -> int:
-    if open_interest >= 3000:
-        return 10
-    if open_interest >= 1000:
-        return 7
-    if open_interest >= 500:
-        return 4
-    return 0
+def compute_dte(expiry_str: str) -> int | None:
+    if not expiry_str:
+        return None
+    try:
+        expiry = datetime.strptime(expiry_str, "%Y-%m-%d").date()
+        now_utc = datetime.now(timezone.utc).date()
+        return (expiry - now_utc).days
+    except ValueError:
+        return None
 
 
-def ratio_score(volume_oi_ratio: float) -> int:
-    if volume_oi_ratio >= 2.5:
-        return 15
-    if volume_oi_ratio >= 1.5:
-        return 10
-    if volume_oi_ratio >= 1.0:
-        return 5
-    return 0
+def build_trade_key(trade: dict) -> str:
+    created_at = trade.get("created_at", "")
+    option_chain = trade.get("option_chain", "")
+    price = str(trade.get("price", ""))
+    premium = str(trade.get("total_premium", ""))
+    size = str(trade.get("total_size", ""))
+    return f"{created_at}|{option_chain}|{price}|{premium}|{size}"
 
 
-def price_quality_score(price: float) -> int:
-    if 1.5 <= price <= 4.99:
-        return 10
-    if 5 <= price <= 10:
-        return 8
-    if 0.5 <= price <= 1.49:
-        return 4
-    if price > 10:
-        return 5
-    return 0
+def ai_reason_summary(trade: dict) -> str:
+    if not client:
+        return "High-premium SPXW flow with strong size and actionable intraday characteristics."
 
-
-def dte_score(days_to_expiry: int) -> int:
-    if days_to_expiry == 0:
-        return 10
-    if days_to_expiry == 1:
-        return 7
-    return 0
-
-
-def direction_score(side_hint: str) -> int:
-    hint = (side_hint or "").lower()
-    if any(x in hint for x in ["ask", "bullish", "opening buy", "sweep"]):
-        return 15
-    if any(x in hint for x in ["mid", "mixed"]):
-        return 7
-    if any(x in hint for x in ["bid", "weak"]):
-        return 3
-    return 7
-
-
-def grade_score(score: int):
-    if score >= 85:
-        return "A+ ELITE", "HIGH"
-    if score >= 75:
-        return "A STRONG", "MEDIUM-HIGH"
-    if score >= 65:
-        return "B WATCHLIST", "WATCH ONLY"
-    return "REJECT", "LOW"
-
-
-def build_targets(entry: float):
-    tp1 = round(entry * 1.30, 2)
-    tp2 = round(entry * 1.50, 2)
-    tp3 = round(entry * 2.00, 2)
-    return tp1, tp2, tp3
-
-
-def build_extensions(entry: float):
-    ext1 = round(entry * 2.40, 2)
-    ext2 = round(entry * 3.00, 2)
-    ext3 = round(entry * 3.80, 2)
-    return ext1, ext2, ext3
-
-
-def build_stop(entry: float):
-    if 0.5 <= entry <= 2.0:
-        return round(entry * 0.75, 2)
-    if 2.01 <= entry <= 5.0:
-        return round(entry * 0.70, 2)
-    return round(entry * 0.65, 2)
-
-
-def passes_initial_filter(data: dict) -> bool:
-    return all([
-        data["symbol"] == "SPXW",
-        data["days_to_expiry"] in (0, 1),
-        data["premium"] >= 100000,
-        data["size"] >= 200,
-        data["volume"] >= 100,
-        data["open_interest"] >= 500,
-        data["volume_oi_ratio"] >= 1.0,
-        0.5 <= data["entry_price"] <= 20.0,
-    ])
-
-
-def score_signal(data: dict) -> int:
-    total = 0
-    total += premium_score(data["premium"])
-    total += size_score(data["size"])
-    total += oi_score(data["open_interest"])
-    total += ratio_score(data["volume_oi_ratio"])
-    total += price_quality_score(data["entry_price"])
-    total += dte_score(data["days_to_expiry"])
-    total += direction_score(data.get("side_hint", ""))
-    return total
-
-
-def ai_reason_summary(data: dict, grade: str, score: int) -> str:
     prompt = f"""
-You are generating a short professional options-flow reason.
-Keep it one line only.
+Write one short professional reason for this options flow signal.
+Keep it to one line only.
 
-Data:
-Symbol: {data['symbol']}
-Side: {data['side']}
-Strike: {data['strike']}
-Premium: {data['premium']}
-Size: {data['size']}
-Open Interest: {data['open_interest']}
-Volume: {data['volume']}
-Volume/OI Ratio: {data['volume_oi_ratio']}
-Entry Price: {data['entry_price']}
-Days To Expiry: {data['days_to_expiry']}
-Grade: {grade}
-Score: {score}
-
-Return one concise reason only.
+Ticker: {trade.get("ticker")}
+Type: {trade.get("type")}
+Strike: {trade.get("strike")}
+Expiry: {trade.get("expiry")}
+Option chain: {trade.get("option_chain")}
+Premium: {trade.get("total_premium")}
+Size: {trade.get("total_size")}
+Volume: {trade.get("volume")}
+Open Interest: {trade.get("open_interest")}
+Volume/OI Ratio: {trade.get("volume_oi_ratio")}
+Price: {trade.get("price")}
+Sweep: {trade.get("has_sweep")}
+Opening: {trade.get("all_opening_trades")}
+Rule: {trade.get("alert_rule")}
 """
+
     try:
         response = client.responses.create(
             model="gpt-5-mini",
@@ -204,30 +138,161 @@ Return one concise reason only.
     except Exception as e:
         print(f"OpenAI fallback: {e}")
 
-    return "Whale flow + strong premium + aggressive momentum"
+    return "High-premium SPXW flow with strong size and actionable intraday characteristics."
 
 
-def send_signal(data: dict):
-    score = score_signal(data)
-    grade, confidence = grade_score(score)
+def grade_signal(trade: dict) -> tuple[str, str, int]:
+    score = 0
 
-    if grade not in ("A+ ELITE", "A STRONG"):
-        print(f"Signal rejected: {grade} ({score})")
+    premium = parse_float(trade.get("total_premium"))
+    size = parse_int(trade.get("total_size"))
+    volume = parse_int(trade.get("volume"))
+    oi = parse_int(trade.get("open_interest"))
+    vol_oi = parse_float(trade.get("volume_oi_ratio"))
+    price = parse_float(trade.get("price"))
+    has_sweep = bool(trade.get("has_sweep"))
+    opening = bool(trade.get("all_opening_trades"))
+
+    if premium >= 500_000:
+        score += 30
+    elif premium >= 300_000:
+        score += 24
+    elif premium >= 200_000:
+        score += 18
+
+    if size >= 1000:
+        score += 18
+    elif size >= 500:
+        score += 14
+    elif size >= 150:
+        score += 9
+
+    if volume >= 5000:
+        score += 12
+    elif volume >= 1000:
+        score += 9
+    elif volume >= 300:
+        score += 6
+
+    if oi >= 3000:
+        score += 10
+    elif oi >= 1000:
+        score += 7
+    elif oi >= 500:
+        score += 4
+
+    if vol_oi >= 3:
+        score += 12
+    elif vol_oi >= 1.5:
+        score += 9
+    elif vol_oi >= 1:
+        score += 5
+
+    if MIN_PRICE <= price <= MAX_PRICE:
+        score += 8
+
+    if has_sweep:
+        score += 6
+
+    if opening:
+        score += 4
+
+    if score >= 75:
+        return "A+ ELITE", "HIGH", score
+    if score >= 60:
+        return "A STRONG", "MEDIUM-HIGH", score
+    if score >= 45:
+        return "B WATCH", "MEDIUM", score
+    return "REJECT", "LOW", score
+
+
+def passes_filter(trade: dict) -> bool:
+    ticker = str(trade.get("ticker", "")).upper()
+    premium = parse_float(trade.get("total_premium"))
+    size = parse_int(trade.get("total_size"))
+    volume = parse_int(trade.get("volume"))
+    oi = parse_int(trade.get("open_interest"))
+    vol_oi = parse_float(trade.get("volume_oi_ratio"))
+    price = parse_float(trade.get("price"))
+    dte = compute_dte(trade.get("expiry", ""))
+
+    if ticker != TARGET_TICKER:
+        return False
+    if premium < MIN_PREMIUM:
+        return False
+    if size < MIN_SIZE:
+        return False
+    if volume < MIN_VOLUME:
+        return False
+    if oi < MIN_OPEN_INTEREST:
+        return False
+    if vol_oi < MIN_VOL_OI_RATIO:
+        return False
+    if not (MIN_PRICE <= price <= MAX_PRICE):
+        return False
+    if dte is None or not (MIN_DTE <= dte <= MAX_DTE):
         return False
 
-    tp1, tp2, tp3 = build_targets(data["entry_price"])
-    stop_price = build_stop(data["entry_price"])
-    reason = ai_reason_summary(data, grade, score)
+    grade, _, _ = grade_signal(trade)
+    if grade == "REJECT":
+        return False
 
-    message = f"""🔥 Quiet Alpha Signal
+    return True
 
-{data['symbol']} {data['dte_label']} {data['side']}
-Strike: {data['strike']}
-Entry: {data['entry_price']:.2f}
+
+def build_targets(entry_price: float) -> tuple[float, float, float]:
+    tp1 = round(entry_price * 1.30, 2)
+    tp2 = round(entry_price * 1.50, 2)
+    tp3 = round(entry_price * 2.00, 2)
+    return tp1, tp2, tp3
+
+
+def build_stop(entry_price: float) -> float:
+    if 0.5 <= entry_price <= 2.0:
+        return round(entry_price * 0.75, 2)
+    if 2.01 <= entry_price <= 5.0:
+        return round(entry_price * 0.70, 2)
+    return round(entry_price * 0.65, 2)
+
+
+def format_signal(trade: dict) -> str:
+    ticker = trade.get("ticker", "N/A")
+    option_type = str(trade.get("type", "")).upper()
+    strike = trade.get("strike", "N/A")
+    expiry = trade.get("expiry", "N/A")
+    option_chain = trade.get("option_chain", "N/A")
+    price = parse_float(trade.get("price"))
+    premium = parse_float(trade.get("total_premium"))
+    size = parse_int(trade.get("total_size"))
+    volume = parse_int(trade.get("volume"))
+    oi = parse_int(trade.get("open_interest"))
+    vol_oi = parse_float(trade.get("volume_oi_ratio"))
+    alert_rule = trade.get("alert_rule", "N/A")
+    has_sweep = "YES" if trade.get("has_sweep") else "NO"
+
+    grade, confidence, score = grade_signal(trade)
+    tp1, tp2, tp3 = build_targets(price)
+    stop = build_stop(price)
+    reason = ai_reason_summary(trade)
+
+    msg = f"""🔥 Quiet Alpha Signal
+
+{ticker} {option_type}
+Strike: {strike}
+Expiry: {expiry}
+Entry: {price:.2f}
 
 Confidence: {confidence}
 Grade: {grade}
 Score: {score}/100
+
+💰 Premium: ${premium:,.0f}
+📦 Size: {size}
+📊 Volume: {volume}
+📌 OI: {oi}
+📈 Vol/OI: {vol_oi:.2f}
+🧹 Sweep: {has_sweep}
+🧠 Rule: {alert_rule}
 
 🎯 Targets:
 TP1: {tp1}
@@ -235,208 +300,90 @@ TP2: {tp2}
 TP3: {tp3}
 
 ⚠️ Stop:
-{stop_price}
+{stop}
+
+🪪 Contract:
+{option_chain}
 
 🧠 Reason:
 {reason}
+
+هذه ليست توصية شراء أو بيع
 """
-    telegram_send(message)
-    return True
+    return msg
 
 
-def send_extension(data: dict):
-    score = score_signal(data)
-    grade, confidence = grade_score(score)
+def fetch_flow_alerts() -> list[dict]:
+    headers = {
+        "Authorization": f"Bearer {UW_API_KEY}",
+        "Accept": "application/json",
+    }
 
-    if grade != "A+ ELITE":
-        return
+    params = {
+        "ticker_symbol": TARGET_TICKER,
+        "min_premium": MIN_PREMIUM,
+        "min_size": MIN_SIZE,
+        "min_volume": MIN_VOLUME,
+        "min_open_interest": MIN_OPEN_INTEREST,
+        "min_volume_oi_ratio": MIN_VOL_OI_RATIO,
+        "min_price": MIN_PRICE,
+        "max_price": MAX_PRICE,
+        "min_dte": MIN_DTE,
+        "max_dte": MAX_DTE,
+        "limit": LIMIT,
+    }
 
-    ext1, ext2, ext3 = build_extensions(data["entry_price"])
+    r = requests.get(UW_FLOW_ALERTS_URL, headers=headers, params=params, timeout=30)
+    r.raise_for_status()
+    payload = r.json()
 
-    message = f"""🌊 Quiet Alpha Extension
+    if isinstance(payload, dict) and "data" in payload:
+        data = payload["data"]
+        if isinstance(data, list):
+            return data
 
-{data['symbol']} {data['dte_label']} {data['side']}
-Strike: {data['strike']}
-Price: {data['entry_price']:.2f}
+    if isinstance(payload, list):
+        return payload
 
-Confidence: {confidence}
-Extension Mode: ACTIVE
-
-🎯 New Targets:
-EXT1: {ext1}
-EXT2: {ext2}
-EXT3: {ext3}
-
-Trail your stop — do not rush exit
-حرّك وقفك — لا تستعجل الخروج
-"""
-    telegram_send(message)
-
-
-def send_30_update(entry: float, now_price: float):
-    message = f"""📈 Quiet Alpha Update
-
-+30% ✅
-
-Entry: {entry:.2f}
-سعر الدخول: {entry:.2f}
-
-Now: {now_price:.2f}
-السعر الآن: {now_price:.2f}
-
-Small accounts: consider taking profit
-محافظ صغيرة: يفضل جني الربح
-
-Large accounts: raise your stop
-محافظ كبيرة: ارفع وقفك
-"""
-    telegram_send(message)
-
-
-def send_50_update(entry: float, now_price: float):
-    message = f"""📈 Quiet Alpha Update
-
-+50% 🔥
-
-Entry: {entry:.2f}
-سعر الدخول: {entry:.2f}
-
-Now: {now_price:.2f}
-السعر الآن: {now_price:.2f}
-
-Raise stop to +20%
-ارفع وقفك إلى +20%
-"""
-    telegram_send(message)
-
-
-def send_70_update(entry: float, now_price: float):
-    message = f"""📈 Quiet Alpha Update
-
-+70% ✨
-
-Entry: {entry:.2f}
-سعر الدخول: {entry:.2f}
-
-Now: {now_price:.2f}
-السعر الآن: {now_price:.2f}
-
-Raise stop to +40%
-ارفع وقفك إلى +40%
-
-Trade is moving in your favor
-الصفقة تسير لصالحك
-"""
-    telegram_send(message)
-
-
-def send_100_update(entry: float, now_price: float):
-    message = f"""🎉 Quiet Alpha
-
-+100% 🎉
-
-Entry: {entry:.2f}
-سعر الدخول: {entry:.2f}
-
-Now: {now_price:.2f}
-السعر الآن: {now_price:.2f}
-
-Execution complete
-تم تنفيذ الصفقة بنجاح
-
-Profit locked
-الربح تحقق
-
-Next move is yours
-القرار الآن بيدك
-"""
-    telegram_send(message)
-
-
-def send_weakening_alert():
-    message = """⚠️ Quiet Alpha Alert
-
-Momentum weakening
-الزخم بدأ يضعف
-
-Liquidity decreasing
-السيولة تقل
-
-Price slowing near resistance
-السعر يتباطأ قرب الهدف
-
-Consider securing profits
-يفضل تأمين الأرباح
-"""
-    telegram_send(message)
-
-
-def send_smart_exit():
-    message = """🧠 Quiet Alpha — Smart Exit
-
-Decision: 🔴 Take Profit
-يفضل الخروج أو تأمين الربح
-
-Based on liquidity & momentum
-بناءً على السيولة والزخم
-
-Manage your trade wisely
-إدارة الصفقة مسؤوليتك
-"""
-    telegram_send(message)
-
-
-def milestone_profit(entry: float, now_price: float) -> float:
-    return ((now_price - entry) / entry) * 100.0
-
-
-def run_demo_milestones(entry: float):
-    prices = [4.94, 5.70, 6.46, 7.60]
-
-    for price in prices:
-        pct = milestone_profit(entry, price)
-
-        if pct >= 100:
-            send_100_update(entry, price)
-        elif pct >= 70:
-            send_70_update(entry, price)
-        elif pct >= 50:
-            send_50_update(entry, price)
-        elif pct >= 30:
-            send_30_update(entry, price)
+    return []
 
 
 def main():
-    raw_contract = "SPXW 24 MAR 2026 5200 CALL"
-    symbol, side, strike, dte_label = parse_contract(raw_contract)
+    print("Quiet Alpha live flow monitor started.")
 
-    signal_data = {
-        "symbol": symbol,
-        "side": side,
-        "strike": strike,
-        "dte_label": dte_label,
-        "days_to_expiry": 0,
-        "premium": 640000,
-        "size": 1200,
-        "open_interest": 2500,
-        "volume": 1800,
-        "volume_oi_ratio": 1.8,
-        "entry_price": 3.80,
-        "side_hint": "ask-side bullish sweep opening buy",
-    }
+    while True:
+        try:
+            trades = fetch_flow_alerts()
 
-    if not passes_initial_filter(signal_data):
-        print("Initial filter failed.")
-        return
+            # newest first if available
+            trades = sorted(
+                trades,
+                key=lambda x: x.get("created_at", ""),
+                reverse=False,
+            )
 
-    sent = send_signal(signal_data)
-    if not sent:
-        return
+            for trade in trades:
+                key = build_trade_key(trade)
 
-    run_demo_milestones(signal_data["entry_price"])
-    send_extension(signal_data)
-    send_weakening_alert()
-    send_smart_exit()
+                if key in seen_ids:
+                    continue
+
+                seen_ids.add(key)
+
+                if passes_filter(trade):
+                    msg = format_signal(trade)
+                    telegram_send(msg)
+                    print(f"Sent signal: {trade.get('option_chain')}")
+
+            # prevent unbounded growth
+            if len(seen_ids) > 5000:
+                seen_ids.clear()
+
+        except Exception as e:
+            error_msg = f"Quiet Alpha bot error: {e}"
+            print(error_msg)
+
+        time.sleep(POLL_SECONDS)
 
 
 if __name__ == "__main__":
