@@ -30,9 +30,81 @@ def format_duration(seconds: int) -> tuple[str, str]:
     return f"{minutes} minute{'s' if minutes > 1 else ''}", f"{minutes} دقيقة"
 
 
-async def send_trade_alert(bot: Bot, chat_id: int, symbol: str, strike: int, option_type: str,
-                           entry: float, stop: float, magnet: int, confidence: str,
-                           premium: str, tp1: float, tp2: float, tp3: float) -> None:
+def is_valid_trade(symbol: str, premium: int, delta: float, expiry: str) -> bool:
+    valid_symbol = symbol in {"SPX", "SPXW"}
+    valid_premium = premium >= 300_000
+    valid_delta = delta >= 0.35
+    valid_expiry = expiry == "0DTE"
+    return valid_symbol and valid_premium and valid_delta and valid_expiry
+
+
+def calculate_score(premium: int, magnet_distance: int, delta: float) -> int:
+    score = 0
+
+    # Premium score
+    if premium >= 1_000_000:
+        score += 40
+    elif premium >= 500_000:
+        score += 30
+    elif premium >= 300_000:
+        score += 20
+
+    # Magnet distance score
+    if magnet_distance <= 10:
+        score += 30
+    elif magnet_distance <= 20:
+        score += 20
+    elif magnet_distance <= 35:
+        score += 10
+
+    # Delta score
+    if delta >= 0.50:
+        score += 25
+    elif delta >= 0.40:
+        score += 20
+    elif delta >= 0.35:
+        score += 10
+
+    return min(score, 99)
+
+
+def confidence_label(score: int) -> str:
+    if score >= 85:
+        return "MONSTER"
+    if score >= 70:
+        return "HIGH"
+    if score >= 55:
+        return "MEDIUM"
+    return "LOW"
+
+
+def confidence_label_ar(score: int) -> str:
+    if score >= 85:
+        return "عالية جدًا"
+    if score >= 70:
+        return "عالية"
+    if score >= 55:
+        return "متوسطة"
+    return "منخفضة"
+
+
+async def send_trade_alert(
+    bot: Bot,
+    chat_id: int,
+    symbol: str,
+    strike: int,
+    option_type: str,
+    entry: float,
+    stop: float,
+    magnet: int,
+    premium_text: str,
+    score: int,
+    confidence_en: str,
+    confidence_ar: str,
+    tp1: float,
+    tp2: float,
+    tp3: float,
+) -> None:
     await bot.send_message(
         chat_id=chat_id,
         text=f"""🚨 Quiet Alpha Trade Alert
@@ -49,11 +121,11 @@ Stop: {stop}
 Magnet: {magnet}
 المغناطيس: {magnet}
 
-Confidence: {confidence}
-قوة الصفقة: {"عالية" if confidence == "HIGH" else "جيدة"}
+Score: {score}
+تقييم الصفقة: {score}
 
-Premium: {premium}
-السيولة: {premium}
+Confidence: {confidence_en}
+قوة الصفقة: {confidence_ar}
 
 Targets:
 TP1: {tp1}
@@ -63,7 +135,10 @@ TP3: {tp3}
 الأهداف:
 الهدف 1: {tp1}
 الهدف 2: {tp2}
-الهدف 3: {tp3}"""
+الهدف 3: {tp3}
+
+Premium: {premium_text}
+السيولة: {premium_text}"""
     )
 
 
@@ -81,8 +156,8 @@ Entry: {entry}
 Now: {now_price}
 السعر الآن: {now_price}
 
-TP1 approaching
-الهدف الأول قريب
+Approaching Target 1
+اقتراب من الهدف الأول
 
 Small accounts: consider taking profit
 Large accounts: raise your stop
@@ -173,9 +248,11 @@ async def main():
     symbol = "SPXW"
     strike = 5200
     option_type = "CALL"
+    expiry = "0DTE"
     entry = 3.80
-    premium = "640K"
-    confidence = "HIGH"
+    premium = 640_000
+    premium_text = "640K"
+    delta = 0.41
     magnet = 5215
     current_price = 5193
 
@@ -185,15 +262,36 @@ async def main():
     price_70 = 6.46
     price_100 = 7.60
 
-    magnet_move_points = abs(magnet - current_price)
+    if not is_valid_trade(symbol, premium, delta, expiry):
+        print("Trade rejected by QA filter.")
+        return
+
+    magnet_distance = abs(magnet - current_price)
+    score = calculate_score(premium, magnet_distance, delta)
+    confidence_en = confidence_label(score)
+    confidence_ar = confidence_label_ar(score)
+
     stop = calculate_stop(entry, stop_pct=0.30)
-    tp1, tp2, tp3 = calculate_targets(entry, magnet_move_points, strength=confidence)
+    tp1, tp2, tp3 = calculate_targets(entry, magnet_distance, strength=confidence_en)
 
     entry_time = datetime.now()
 
     await send_trade_alert(
-        bot, chat_id, symbol, strike, option_type,
-        entry, stop, magnet, confidence, premium, tp1, tp2, tp3
+        bot=bot,
+        chat_id=chat_id,
+        symbol=symbol,
+        strike=strike,
+        option_type=option_type,
+        entry=entry,
+        stop=stop,
+        magnet=magnet,
+        premium_text=premium_text,
+        score=score,
+        confidence_en=confidence_en,
+        confidence_ar=confidence_ar,
+        tp1=tp1,
+        tp2=tp2,
+        tp3=tp3,
     )
 
     await asyncio.sleep(8)
