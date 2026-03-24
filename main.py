@@ -1,6 +1,6 @@
 import os
 import re
-from telegram import Bot
+import requests
 from openai import OpenAI
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -16,8 +16,20 @@ if not CHAT_ID:
 if not OPENAI_API_KEY:
     raise ValueError("OPENAI_API_KEY is missing")
 
-bot = Bot(token=BOT_TOKEN)
 client = OpenAI(api_key=OPENAI_API_KEY)
+
+
+def telegram_send(text: str):
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+    payload = {
+        "chat_id": CHAT_ID,
+        "text": text,
+    }
+    r = requests.post(url, json=payload, timeout=30)
+    r.raise_for_status()
+    data = r.json()
+    if not data.get("ok"):
+        raise RuntimeError(f"Telegram API error: {data}")
 
 
 def parse_contract(text: str):
@@ -228,7 +240,7 @@ TP3: {tp3}
 🧠 Reason:
 {reason}
 """
-    bot.send_message(chat_id=CHAT_ID, text=message)
+    telegram_send(message)
     return True
 
 
@@ -258,7 +270,7 @@ EXT3: {ext3}
 Trail your stop — do not rush exit
 حرّك وقفك — لا تستعجل الخروج
 """
-    bot.send_message(chat_id=CHAT_ID, text=message)
+    telegram_send(message)
 
 
 def send_30_update(entry: float, now_price: float):
@@ -278,7 +290,7 @@ Small accounts: consider taking profit
 Large accounts: raise your stop
 محافظ كبيرة: ارفع وقفك
 """
-    bot.send_message(chat_id=CHAT_ID, text=message)
+    telegram_send(message)
 
 
 def send_50_update(entry: float, now_price: float):
@@ -295,7 +307,7 @@ Now: {now_price:.2f}
 Raise stop to +20%
 ارفع وقفك إلى +20%
 """
-    bot.send_message(chat_id=CHAT_ID, text=message)
+    telegram_send(message)
 
 
 def send_70_update(entry: float, now_price: float):
@@ -315,7 +327,7 @@ Raise stop to +40%
 Trade is moving in your favor
 الصفقة تسير لصالحك
 """
-    bot.send_message(chat_id=CHAT_ID, text=message)
+    telegram_send(message)
 
 
 def send_100_update(entry: float, now_price: float):
@@ -338,7 +350,7 @@ Profit locked
 Next move is yours
 القرار الآن بيدك
 """
-    bot.send_message(chat_id=CHAT_ID, text=message)
+    telegram_send(message)
 
 
 def send_weakening_alert():
@@ -356,7 +368,7 @@ Price slowing near resistance
 Consider securing profits
 يفضل تأمين الأرباح
 """
-    bot.send_message(chat_id=CHAT_ID, text=message)
+    telegram_send(message)
 
 
 def send_smart_exit():
@@ -371,7 +383,7 @@ Based on liquidity & momentum
 Manage your trade wisely
 إدارة الصفقة مسؤوليتك
 """
-    bot.send_message(chat_id=CHAT_ID, text=message)
+    telegram_send(message)
 
 
 def milestone_profit(entry: float, now_price: float) -> float:
