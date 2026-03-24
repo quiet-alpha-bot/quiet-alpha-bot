@@ -96,6 +96,43 @@ def should_send_extension(score: int, current_price: float, tp3: float) -> bool:
     return score >= 60 and current_price > tp3
 
 
+def should_send_weakening(premium: int, prev_premium: int, current_price: float, tp3: float) -> bool:
+    liquidity_drop = premium < prev_premium * 0.5
+    near_target = current_price >= tp3 * 0.9
+    return liquidity_drop and near_target
+
+
+def calculate_exit_score(premium: int, prev_premium: int, current_price: float, tp3: float) -> int:
+    score = 0
+
+    # Current liquidity
+    if premium > 500_000:
+        score += 2
+    elif premium > 300_000:
+        score += 1
+    else:
+        score -= 1
+
+    # Liquidity fading
+    if premium < prev_premium:
+        score -= 1
+
+    # Close to major target
+    if current_price >= tp3 * 0.9:
+        score -= 2
+
+    return score
+
+
+def get_exit_decision(score: int) -> tuple[str, str]:
+    if score >= 2:
+        return "🟢 Strong Hold", "استمرار قوي"
+    elif score >= 0:
+        return "🟡 Hold", "استمر بحذر"
+    else:
+        return "🔴 Take Profit", "يفضل الخروج أو تأمين الربح"
+
+
 async def send_trade_alert(
     bot: Bot,
     chat_id: int,
@@ -294,6 +331,45 @@ Momentum phase active
     )
 
 
+async def send_weakening_alert(bot: Bot, chat_id: int) -> None:
+    await bot.send_message(
+        chat_id=chat_id,
+        text="""⚠️ Quiet Alpha Alert
+تنبيه كوايت ألفا
+
+Momentum weakening
+الزخم بدأ يضعف
+
+Liquidity decreasing
+السيولة تقل
+
+Price slowing near resistance
+السعر يتباطأ قرب الهدف
+
+Consider securing profits
+يفضل تأمين الأرباح
+
+Avoid overextension
+تجنب الطمع"""
+    )
+
+
+async def send_exit_score(bot: Bot, chat_id: int, decision_en: str, decision_ar: str) -> None:
+    await bot.send_message(
+        chat_id=chat_id,
+        text=f"""🧠 Quiet Alpha — Smart Exit
+
+Decision: {decision_en}
+{decision_ar}
+
+Based on liquidity & momentum
+بناءً على السيولة والزخم
+
+Manage your trade wisely
+إدارة الصفقة مسؤوليتك"""
+    )
+
+
 async def main():
     if not BOT_TOKEN:
         raise ValueError("BOT_TOKEN is missing")
@@ -311,6 +387,7 @@ async def main():
     entry = 3.80
     premium = 640_000
     premium_text = "640K"
+    prev_premium = 900_000
     delta = 0.41
     magnet = 5215
     current_price = 5193
@@ -321,6 +398,9 @@ async def main():
     price_70 = 6.46
     price_100 = 7.60
     extension_price = 9.20
+
+    # Demo fading liquidity after extension
+    fading_premium = 180_000
 
     if not is_valid_trade(symbol, premium, delta, expiry):
         print("Trade rejected by QA filter.")
@@ -360,8 +440,20 @@ async def main():
     await asyncio.sleep(8)
     await send_update_50(bot, chat_id, entry, price_50)
 
+    # Smart exit after 50%
+    exit_score_50 = calculate_exit_score(premium, prev_premium, price_50, tp3)
+    decision_en_50, decision_ar_50 = get_exit_decision(exit_score_50)
+    await asyncio.sleep(4)
+    await send_exit_score(bot, chat_id, decision_en_50, decision_ar_50)
+
     await asyncio.sleep(8)
     await send_update_70(bot, chat_id, entry, price_70)
+
+    # Smart exit after 70%
+    exit_score_70 = calculate_exit_score(premium, prev_premium, price_70, tp3)
+    decision_en_70, decision_ar_70 = get_exit_decision(exit_score_70)
+    await asyncio.sleep(4)
+    await send_exit_score(bot, chat_id, decision_en_70, decision_ar_70)
 
     await asyncio.sleep(8)
     duration_seconds = int((datetime.now() - entry_time).total_seconds())
@@ -375,6 +467,17 @@ async def main():
 
         await asyncio.sleep(8)
         await send_extension_targets(bot, chat_id, ext1, ext2, ext3)
+
+        # Weakening check after extension
+        if should_send_weakening(fading_premium, premium, extension_price, tp3):
+            await asyncio.sleep(8)
+            await send_weakening_alert(bot, chat_id)
+
+            exit_score_ext = calculate_exit_score(fading_premium, premium, extension_price, tp3)
+            decision_en_ext, decision_ar_ext = get_exit_decision(exit_score_ext)
+
+            await asyncio.sleep(4)
+            await send_exit_score(bot, chat_id, decision_en_ext, decision_ar_ext)
 
 
 if __name__ == "__main__":
