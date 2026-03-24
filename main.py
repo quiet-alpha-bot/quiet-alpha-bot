@@ -19,7 +19,6 @@ if not CHAT_ID:
 if not UW_API_KEY:
     raise ValueError("UW_API_KEY is missing")
 
-# OpenAI optional
 client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 
 TELEGRAM_URL = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
@@ -27,21 +26,21 @@ UW_FLOW_ALERTS_URL = "https://api.unusualwhales.com/api/option-trades/flow-alert
 
 POLL_SECONDS = 20
 
-# Quiet Alpha filter
+# Quiet Alpha filter — Professional / calm mode
 TARGET_TICKER = "SPXW"
-MIN_PREMIUM = 200_000
-MIN_SIZE = 150
-MIN_VOLUME = 300
+MIN_PREMIUM = 300_000
+MIN_SIZE = 300
+MIN_VOLUME = 1000
 MIN_OPEN_INTEREST = 500
-MIN_VOL_OI_RATIO = 1.0
+MIN_VOL_OI_RATIO = 1.5
 MIN_PRICE = 0.5
 MAX_PRICE = 20.0
 MIN_DTE = 0
 MAX_DTE = 1
 LIMIT = 100
 
-# In-memory dedupe for this process
-seen_ids = set()
+COOLDOWN_SECONDS = 600  # 10 minutes
+sent_contracts = {}
 
 
 def telegram_send(text: str) -> None:
@@ -74,15 +73,6 @@ def parse_int(value, default=0) -> int:
         return int(default)
 
 
-def parse_created_at(value: str) -> datetime | None:
-    if not value:
-        return None
-    try:
-        return datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except ValueError:
-        return None
-
-
 def compute_dte(expiry_str: str) -> int | None:
     if not expiry_str:
         return None
@@ -95,17 +85,17 @@ def compute_dte(expiry_str: str) -> int | None:
 
 
 def build_trade_key(trade: dict) -> str:
-    created_at = trade.get("created_at", "")
     option_chain = trade.get("option_chain", "")
-    price = str(trade.get("price", ""))
-    premium = str(trade.get("total_premium", ""))
-    size = str(trade.get("total_size", ""))
-    return f"{created_at}|{option_chain}|{price}|{premium}|{size}"
+    ticker = trade.get("ticker", "")
+    expiry = trade.get("expiry", "")
+    strike = str(trade.get("strike", ""))
+    opt_type = str(trade.get("type", ""))
+    return f"{ticker}|{expiry}|{strike}|{opt_type}|{option_chain}"
 
 
 def ai_reason_summary(trade: dict) -> str:
     if not client:
-        return "High-premium SPXW flow with strong size and actionable intraday characteristics."
+        return "High-premium SPXW flow with strong size and notable volume/OI characteristics."
 
     prompt = f"""
 Write one short professional reason for this options flow signal.
@@ -138,7 +128,7 @@ Rule: {trade.get("alert_rule")}
     except Exception as e:
         print(f"OpenAI fallback: {e}")
 
-    return "High-premium SPXW flow with strong size and actionable intraday characteristics."
+    return "High-premium SPXW flow with strong size and notable volume/OI characteristics."
 
 
 def grade_signal(trade: dict) -> tuple[str, str, int]:
@@ -153,26 +143,26 @@ def grade_signal(trade: dict) -> tuple[str, str, int]:
     has_sweep = bool(trade.get("has_sweep"))
     opening = bool(trade.get("all_opening_trades"))
 
-    if premium >= 500_000:
+    if premium >= 700_000:
         score += 30
+    elif premium >= 500_000:
+        score += 26
     elif premium >= 300_000:
-        score += 24
-    elif premium >= 200_000:
-        score += 18
+        score += 20
 
     if size >= 1000:
         score += 18
     elif size >= 500:
         score += 14
-    elif size >= 150:
-        score += 9
+    elif size >= 300:
+        score += 10
 
-    if volume >= 5000:
-        score += 12
+    if volume >= 10000:
+        score += 14
+    elif volume >= 5000:
+        score += 11
     elif volume >= 1000:
-        score += 9
-    elif volume >= 300:
-        score += 6
+        score += 7
 
     if oi >= 3000:
         score += 10
@@ -181,18 +171,18 @@ def grade_signal(trade: dict) -> tuple[str, str, int]:
     elif oi >= 500:
         score += 4
 
-    if vol_oi >= 3:
-        score += 12
+    if vol_oi >= 4:
+        score += 14
+    elif vol_oi >= 2.5:
+        score += 10
     elif vol_oi >= 1.5:
-        score += 9
-    elif vol_oi >= 1:
-        score += 5
+        score += 6
 
     if MIN_PRICE <= price <= MAX_PRICE:
-        score += 8
+        score += 6
 
     if has_sweep:
-        score += 6
+        score += 4
 
     if opening:
         score += 4
@@ -348,14 +338,24 @@ def fetch_flow_alerts() -> list[dict]:
     return []
 
 
+def cleanup_sent_contracts() -> None:
+    now_ts = time.time()
+    expired_keys = [
+        key for key, ts in sent_contracts.items()
+        if now_ts - ts > COOLDOWN_SECONDS
+    ]
+    for key in expired_keys:
+        del sent_contracts[key]
+
+
 def main():
     print("Quiet Alpha live flow monitor started.")
 
     while True:
         try:
+            cleanup_sent_contracts()
             trades = fetch_flow_alerts()
 
-            # newest first if available
             trades = sorted(
                 trades,
                 key=lambda x: x.get("created_at", ""),
@@ -363,21 +363,20 @@ def main():
             )
 
             for trade in trades:
-                key = build_trade_key(trade)
-
-                if key in seen_ids:
+                if not passes_filter(trade):
                     continue
 
-                seen_ids.add(key)
+                key = build_trade_key(trade)
+                now_ts = time.time()
+                last_sent = sent_contracts.get(key, 0)
 
-                if passes_filter(trade):
-                    msg = format_signal(trade)
-                    telegram_send(msg)
-                    print(f"Sent signal: {trade.get('option_chain')}")
+                if now_ts - last_sent < COOLDOWN_SECONDS:
+                    continue
 
-            # prevent unbounded growth
-            if len(seen_ids) > 5000:
-                seen_ids.clear()
+                sent_contracts[key] = now_ts
+                msg = format_signal(trade)
+                telegram_send(msg)
+                print(f"Sent signal: {trade.get('option_chain')}")
 
         except Exception as e:
             error_msg = f"Quiet Alpha bot error: {e}"
