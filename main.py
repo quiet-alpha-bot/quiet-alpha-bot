@@ -93,7 +93,7 @@ def confidence_label_ar(score: int) -> str:
 
 
 def should_send_extension(score: int, current_price: float, tp3: float) -> bool:
-    return score >= 80 and current_price > tp3
+    return score >= 60 and current_price > tp3
 
 
 async def send_trade_alert(
