@@ -8,15 +8,10 @@ CHAT_ID = os.getenv("SIGNAL_CHAT_ID")
 
 
 def calculate_stop(entry: float, stop_pct: float = 0.30) -> float:
-    """Stop loss = 30% below entry by default."""
     return round(entry * (1 - stop_pct), 2)
 
 
 def calculate_targets(entry: float, magnet_move_points: float, strength: str = "HIGH") -> tuple[float, float, float]:
-    """
-    Simplified contract targets based on magnet distance.
-    This is a practical starter model for your private testing phase.
-    """
     if strength.upper() == "HIGH":
         mult1, mult2, mult3 = 0.06, 0.14, 0.21
     else:
@@ -28,43 +23,18 @@ def calculate_targets(entry: float, magnet_move_points: float, strength: str = "
     return tp1, tp2, tp3
 
 
-async def main():
-    if not BOT_TOKEN:
-        raise ValueError("BOT_TOKEN is missing")
-    if not CHAT_ID:
-        raise ValueError("SIGNAL_CHAT_ID is missing")
+def format_duration(seconds: int) -> tuple[str, str]:
+    if seconds < 60:
+        return f"{seconds} seconds", f"{seconds} ثانية"
+    minutes = seconds // 60
+    return f"{minutes} minute{'s' if minutes > 1 else ''}", f"{minutes} دقيقة"
 
-    bot = Bot(token=BOT_TOKEN)
 
-    # -----------------------------
-    # Demo trade data (temporary)
-    # Later we replace this with UW API
-    # -----------------------------
-    symbol = "SPXW"
-    strike = 5200
-    option_type = "CALL"
-    entry = 3.80
-    now_30 = 4.94
-    now_50 = 5.70
-    now_70 = 6.46
-    now_100 = 7.60
-
-    premium = "640K"
-    confidence = "HIGH"
-    magnet = 5215
-    current_price = 5193
-
-    # Difference between current index price and magnet
-    magnet_move_points = abs(magnet - current_price)
-
-    stop = calculate_stop(entry, stop_pct=0.30)
-    tp1, tp2, tp3 = calculate_targets(entry, magnet_move_points, strength=confidence)
-
-    entry_time = datetime.now()
-
-    # 1) TRADE ALERT
+async def send_trade_alert(bot: Bot, chat_id: int, symbol: str, strike: int, option_type: str,
+                           entry: float, stop: float, magnet: int, confidence: str,
+                           premium: str, tp1: float, tp2: float, tp3: float) -> None:
     await bot.send_message(
-        chat_id=int(CHAT_ID),
+        chat_id=chat_id,
         text=f"""🚨 Quiet Alpha Trade Alert
 تنبيه صفقة — Quiet Alpha
 
@@ -96,11 +66,10 @@ TP3: {tp3}
 الهدف 3: {tp3}"""
     )
 
-    await asyncio.sleep(5)
 
-    # 2) +30%
+async def send_update_30(bot: Bot, chat_id: int, entry: float, now_price: float) -> None:
     await bot.send_message(
-        chat_id=int(CHAT_ID),
+        chat_id=chat_id,
         text=f"""📈 Quiet Alpha Update
 تحديث كوايت ألفا
 
@@ -109,8 +78,8 @@ TP3: {tp3}
 Entry: {entry}
 سعر الدخول: {entry}
 
-Now: {now_30}
-السعر الآن: {now_30}
+Now: {now_price}
+السعر الآن: {now_price}
 
 TP1 approaching
 الهدف الأول قريب
@@ -122,11 +91,10 @@ Large accounts: raise your stop
 محافظ كبيرة: ارفع وقفك"""
     )
 
-    await asyncio.sleep(5)
 
-    # 3) +50%
+async def send_update_50(bot: Bot, chat_id: int, entry: float, now_price: float) -> None:
     await bot.send_message(
-        chat_id=int(CHAT_ID),
+        chat_id=chat_id,
         text=f"""📈 Quiet Alpha Update
 تحديث كوايت ألفا
 
@@ -135,18 +103,17 @@ Large accounts: raise your stop
 Entry: {entry}
 سعر الدخول: {entry}
 
-Now: {now_50}
-السعر الآن: {now_50}
+Now: {now_price}
+السعر الآن: {now_price}
 
 Raise stop to +20%
 ارفع وقفك إلى +20%"""
     )
 
-    await asyncio.sleep(5)
 
-    # 4) +70%
+async def send_update_70(bot: Bot, chat_id: int, entry: float, now_price: float) -> None:
     await bot.send_message(
-        chat_id=int(CHAT_ID),
+        chat_id=chat_id,
         text=f"""📈 Quiet Alpha Update
 تحديث كوايت ألفا
 
@@ -155,8 +122,8 @@ Raise stop to +20%
 Entry: {entry}
 سعر الدخول: {entry}
 
-Now: {now_70}
-السعر الآن: {now_70}
+Now: {now_price}
+السعر الآن: {now_price}
 
 Raise stop to +40%
 ارفع وقفك إلى +40%
@@ -165,19 +132,12 @@ Trade is moving in your favor
 الصفقة تسير لصالحك"""
     )
 
-    await asyncio.sleep(5)
 
-    # 5) +100%
-    duration_minutes = int((datetime.now() - entry_time).total_seconds() // 60)
-    if duration_minutes == 0:
-        duration_text_en = "Less than 1 minute"
-        duration_text_ar = "أقل من دقيقة"
-    else:
-        duration_text_en = f"{duration_minutes}m"
-        duration_text_ar = f"{duration_minutes} دقيقة"
+async def send_update_100(bot: Bot, chat_id: int, entry: float, now_price: float, duration_seconds: int) -> None:
+    duration_en, duration_ar = format_duration(duration_seconds)
 
     await bot.send_message(
-        chat_id=int(CHAT_ID),
+        chat_id=chat_id,
         text=f"""🎯 Quiet Alpha
 كوايت ألفا
 
@@ -186,11 +146,11 @@ Trade is moving in your favor
 Entry: {entry}
 سعر الدخول: {entry}
 
-Now: {now_100}
-السعر الآن: {now_100}
+Now: {now_price}
+السعر الآن: {now_price}
 
-Duration: {duration_text_en}
-مدة الصفقة: {duration_text_ar}
+Duration: {duration_en}
+مدة الصفقة: {duration_ar}
 
 Successful trade
 صفقة ناجحة
@@ -198,6 +158,56 @@ Successful trade
 Continuation is your decision
 الاستمرار بالصفقة قرارك"""
     )
+
+
+async def main():
+    if not BOT_TOKEN:
+        raise ValueError("BOT_TOKEN is missing")
+    if not CHAT_ID:
+        raise ValueError("SIGNAL_CHAT_ID is missing")
+
+    bot = Bot(token=BOT_TOKEN)
+    chat_id = int(CHAT_ID)
+
+    # Demo trade data for internal testing
+    symbol = "SPXW"
+    strike = 5200
+    option_type = "CALL"
+    entry = 3.80
+    premium = "640K"
+    confidence = "HIGH"
+    magnet = 5215
+    current_price = 5193
+
+    # Demo progress prices
+    price_30 = 4.94
+    price_50 = 5.70
+    price_70 = 6.46
+    price_100 = 7.60
+
+    magnet_move_points = abs(magnet - current_price)
+    stop = calculate_stop(entry, stop_pct=0.30)
+    tp1, tp2, tp3 = calculate_targets(entry, magnet_move_points, strength=confidence)
+
+    entry_time = datetime.now()
+
+    await send_trade_alert(
+        bot, chat_id, symbol, strike, option_type,
+        entry, stop, magnet, confidence, premium, tp1, tp2, tp3
+    )
+
+    await asyncio.sleep(8)
+    await send_update_30(bot, chat_id, entry, price_30)
+
+    await asyncio.sleep(8)
+    await send_update_50(bot, chat_id, entry, price_50)
+
+    await asyncio.sleep(8)
+    await send_update_70(bot, chat_id, entry, price_70)
+
+    await asyncio.sleep(8)
+    duration_seconds = int((datetime.now() - entry_time).total_seconds())
+    await send_update_100(bot, chat_id, entry, price_100, duration_seconds)
 
 
 if __name__ == "__main__":
