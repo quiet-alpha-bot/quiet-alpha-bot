@@ -1,6 +1,5 @@
 import os
 import re
-import asyncio
 from telegram import Bot
 from openai import OpenAI
 
@@ -21,23 +20,14 @@ bot = Bot(token=BOT_TOKEN)
 client = OpenAI(api_key=OPENAI_API_KEY)
 
 
-def parse_contract(contract_text: str) -> dict:
-    text = contract_text.upper().strip()
-
+def parse_contract(text: str):
+    text = text.upper()
     side = "CALL" if "CALL" in text else "PUT" if "PUT" in text else "UNKNOWN"
-
     strike_match = re.search(r"\b(\d{3,5})\b(?=\s+(CALL|PUT))", text)
     strike = strike_match.group(1) if strike_match else "N/A"
-
     symbol = "SPXW" if "SPXW" in text else "SPX"
     dte_label = "0DTE" if symbol == "SPXW" else "1DTE"
-
-    return {
-        "symbol": symbol,
-        "side": side,
-        "strike": strike,
-        "dte_label": dte_label,
-    }
+    return symbol, side, strike, dte_label
 
 
 def premium_score(premium: float) -> int:
@@ -113,7 +103,7 @@ def direction_score(side_hint: str) -> int:
     return 7
 
 
-def grade_score(score: int) -> tuple[str, str]:
+def grade_score(score: int):
     if score >= 85:
         return "A+ ELITE", "HIGH"
     if score >= 75:
@@ -123,21 +113,21 @@ def grade_score(score: int) -> tuple[str, str]:
     return "REJECT", "LOW"
 
 
-def build_targets(entry: float) -> tuple[float, float, float]:
+def build_targets(entry: float):
     tp1 = round(entry * 1.30, 2)
     tp2 = round(entry * 1.50, 2)
     tp3 = round(entry * 2.00, 2)
     return tp1, tp2, tp3
 
 
-def build_extensions(entry: float) -> tuple[float, float, float]:
+def build_extensions(entry: float):
     ext1 = round(entry * 2.40, 2)
     ext2 = round(entry * 3.00, 2)
     ext3 = round(entry * 3.80, 2)
     return ext1, ext2, ext3
 
 
-def build_stop(entry: float) -> float:
+def build_stop(entry: float):
     if 0.5 <= entry <= 2.0:
         return round(entry * 0.75, 2)
     if 2.01 <= entry <= 5.0:
@@ -146,18 +136,16 @@ def build_stop(entry: float) -> float:
 
 
 def passes_initial_filter(data: dict) -> bool:
-    return all(
-        [
-            data["symbol"] == "SPXW",
-            data["days_to_expiry"] in (0, 1),
-            data["premium"] >= 100000,
-            data["size"] >= 200,
-            data["volume"] >= 100,
-            data["open_interest"] >= 500,
-            data["volume_oi_ratio"] >= 1.0,
-            0.5 <= data["entry_price"] <= 20.0,
-        ]
-    )
+    return all([
+        data["symbol"] == "SPXW",
+        data["days_to_expiry"] in (0, 1),
+        data["premium"] >= 100000,
+        data["size"] >= 200,
+        data["volume"] >= 100,
+        data["open_interest"] >= 500,
+        data["volume_oi_ratio"] >= 1.0,
+        0.5 <= data["entry_price"] <= 20.0,
+    ])
 
 
 def score_signal(data: dict) -> int:
@@ -193,7 +181,6 @@ Score: {score}
 
 Return one concise reason only.
 """
-
     try:
         response = client.responses.create(
             model="gpt-5-mini",
@@ -203,18 +190,18 @@ Return one concise reason only.
         if text:
             return text
     except Exception as e:
-        print(f"OpenAI reason fallback: {e}")
+        print(f"OpenAI fallback: {e}")
 
     return "Whale flow + strong premium + aggressive momentum"
 
 
-async def send_signal(data: dict):
+def send_signal(data: dict):
     score = score_signal(data)
     grade, confidence = grade_score(score)
 
     if grade not in ("A+ ELITE", "A STRONG"):
         print(f"Signal rejected: {grade} ({score})")
-        return
+        return False
 
     tp1, tp2, tp3 = build_targets(data["entry_price"])
     stop_price = build_stop(data["entry_price"])
@@ -241,11 +228,11 @@ TP3: {tp3}
 🧠 Reason:
 {reason}
 """
+    bot.send_message(chat_id=CHAT_ID, text=message)
+    return True
 
-    await bot.send_message(chat_id=CHAT_ID, text=message)
 
-
-async def send_extension(data: dict):
+def send_extension(data: dict):
     score = score_signal(data)
     grade, confidence = grade_score(score)
 
@@ -271,10 +258,90 @@ EXT3: {ext3}
 Trail your stop — do not rush exit
 حرّك وقفك — لا تستعجل الخروج
 """
-    await bot.send_message(chat_id=CHAT_ID, text=message)
+    bot.send_message(chat_id=CHAT_ID, text=message)
 
 
-async def send_weakening_alert():
+def send_30_update(entry: float, now_price: float):
+    message = f"""📈 Quiet Alpha Update
+
++30% ✅
+
+Entry: {entry:.2f}
+سعر الدخول: {entry:.2f}
+
+Now: {now_price:.2f}
+السعر الآن: {now_price:.2f}
+
+Small accounts: consider taking profit
+محافظ صغيرة: يفضل جني الربح
+
+Large accounts: raise your stop
+محافظ كبيرة: ارفع وقفك
+"""
+    bot.send_message(chat_id=CHAT_ID, text=message)
+
+
+def send_50_update(entry: float, now_price: float):
+    message = f"""📈 Quiet Alpha Update
+
++50% 🔥
+
+Entry: {entry:.2f}
+سعر الدخول: {entry:.2f}
+
+Now: {now_price:.2f}
+السعر الآن: {now_price:.2f}
+
+Raise stop to +20%
+ارفع وقفك إلى +20%
+"""
+    bot.send_message(chat_id=CHAT_ID, text=message)
+
+
+def send_70_update(entry: float, now_price: float):
+    message = f"""📈 Quiet Alpha Update
+
++70% ✨
+
+Entry: {entry:.2f}
+سعر الدخول: {entry:.2f}
+
+Now: {now_price:.2f}
+السعر الآن: {now_price:.2f}
+
+Raise stop to +40%
+ارفع وقفك إلى +40%
+
+Trade is moving in your favor
+الصفقة تسير لصالحك
+"""
+    bot.send_message(chat_id=CHAT_ID, text=message)
+
+
+def send_100_update(entry: float, now_price: float):
+    message = f"""🎉 Quiet Alpha
+
++100% 🎉
+
+Entry: {entry:.2f}
+سعر الدخول: {entry:.2f}
+
+Now: {now_price:.2f}
+السعر الآن: {now_price:.2f}
+
+Execution complete
+تم تنفيذ الصفقة بنجاح
+
+Profit locked
+الربح تحقق
+
+Next move is yours
+القرار الآن بيدك
+"""
+    bot.send_message(chat_id=CHAT_ID, text=message)
+
+
+def send_weakening_alert():
     message = """⚠️ Quiet Alpha Alert
 
 Momentum weakening
@@ -289,10 +356,10 @@ Price slowing near resistance
 Consider securing profits
 يفضل تأمين الأرباح
 """
-    await bot.send_message(chat_id=CHAT_ID, text=message)
+    bot.send_message(chat_id=CHAT_ID, text=message)
 
 
-async def send_smart_exit():
+def send_smart_exit():
     message = """🧠 Quiet Alpha — Smart Exit
 
 Decision: 🔴 Take Profit
@@ -304,18 +371,38 @@ Based on liquidity & momentum
 Manage your trade wisely
 إدارة الصفقة مسؤوليتك
 """
-    await bot.send_message(chat_id=CHAT_ID, text=message)
+    bot.send_message(chat_id=CHAT_ID, text=message)
 
 
-async def demo_run():
+def milestone_profit(entry: float, now_price: float) -> float:
+    return ((now_price - entry) / entry) * 100.0
+
+
+def run_demo_milestones(entry: float):
+    prices = [4.94, 5.70, 6.46, 7.60]
+
+    for price in prices:
+        pct = milestone_profit(entry, price)
+
+        if pct >= 100:
+            send_100_update(entry, price)
+        elif pct >= 70:
+            send_70_update(entry, price)
+        elif pct >= 50:
+            send_50_update(entry, price)
+        elif pct >= 30:
+            send_30_update(entry, price)
+
+
+def main():
     raw_contract = "SPXW 24 MAR 2026 5200 CALL"
-    parsed = parse_contract(raw_contract)
+    symbol, side, strike, dte_label = parse_contract(raw_contract)
 
     signal_data = {
-        "symbol": parsed["symbol"],
-        "side": parsed["side"],
-        "strike": parsed["strike"],
-        "dte_label": parsed["dte_label"],
+        "symbol": symbol,
+        "side": side,
+        "strike": strike,
+        "dte_label": dte_label,
         "days_to_expiry": 0,
         "premium": 640000,
         "size": 1200,
@@ -330,17 +417,14 @@ async def demo_run():
         print("Initial filter failed.")
         return
 
-    await send_signal(signal_data)
-    await send_extension(signal_data)
-    await send_weakening_alert()
-    await send_smart_exit()
+    sent = send_signal(signal_data)
+    if not sent:
+        return
 
-
-def main():
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    loop.run_until_complete(demo_run())
-    loop.close()
+    run_demo_milestones(signal_data["entry_price"])
+    send_extension(signal_data)
+    send_weakening_alert()
+    send_smart_exit()
 
 
 if __name__ == "__main__":
