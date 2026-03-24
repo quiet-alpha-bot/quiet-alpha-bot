@@ -25,21 +25,22 @@ TELEGRAM_URL = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
 UW_FLOW_ALERTS_URL = "https://api.unusualwhales.com/api/option-trades/flow-alerts"
 
 POLL_SECONDS = 20
+SEND_WINDOW_SECONDS = 300  # 5 minutes
 
-# Quiet Alpha filter — Professional / calm mode
+# Quiet Alpha Elite filter
 TARGET_TICKER = "SPXW"
-MIN_PREMIUM = 300_000
-MIN_SIZE = 300
-MIN_VOLUME = 1000
+MIN_PREMIUM = 500_000
+MIN_SIZE = 400
+MIN_VOLUME = 2000
 MIN_OPEN_INTEREST = 500
-MIN_VOL_OI_RATIO = 1.5
+MIN_VOL_OI_RATIO = 2.0
 MIN_PRICE = 0.5
 MAX_PRICE = 20.0
 MIN_DTE = 0
 MAX_DTE = 1
 LIMIT = 100
 
-COOLDOWN_SECONDS = 600  # 10 minutes
+last_sent_time = 0
 sent_contracts = {}
 
 
@@ -95,7 +96,7 @@ def build_trade_key(trade: dict) -> str:
 
 def ai_reason_summary(trade: dict) -> str:
     if not client:
-        return "High-premium SPXW flow with strong size and notable volume/OI characteristics."
+        return "High-premium SPXW flow with strong volume/OI and institutional-quality characteristics."
 
     prompt = f"""
 Write one short professional reason for this options flow signal.
@@ -128,7 +129,7 @@ Rule: {trade.get("alert_rule")}
     except Exception as e:
         print(f"OpenAI fallback: {e}")
 
-    return "High-premium SPXW flow with strong size and notable volume/OI characteristics."
+    return "High-premium SPXW flow with strong volume/OI and institutional-quality characteristics."
 
 
 def grade_signal(trade: dict) -> tuple[str, str, int]:
@@ -143,40 +144,40 @@ def grade_signal(trade: dict) -> tuple[str, str, int]:
     has_sweep = bool(trade.get("has_sweep"))
     opening = bool(trade.get("all_opening_trades"))
 
-    if premium >= 700_000:
-        score += 30
+    if premium >= 1_000_000:
+        score += 32
+    elif premium >= 750_000:
+        score += 28
     elif premium >= 500_000:
-        score += 26
-    elif premium >= 300_000:
-        score += 20
+        score += 22
 
-    if size >= 1000:
+    if size >= 1500:
         score += 18
-    elif size >= 500:
-        score += 14
-    elif size >= 300:
+    elif size >= 1000:
+        score += 15
+    elif size >= 400:
         score += 10
 
     if volume >= 10000:
         score += 14
     elif volume >= 5000:
         score += 11
-    elif volume >= 1000:
-        score += 7
+    elif volume >= 2000:
+        score += 8
 
-    if oi >= 3000:
+    if oi >= 5000:
         score += 10
-    elif oi >= 1000:
+    elif oi >= 2000:
         score += 7
     elif oi >= 500:
         score += 4
 
     if vol_oi >= 4:
         score += 14
-    elif vol_oi >= 2.5:
-        score += 10
-    elif vol_oi >= 1.5:
-        score += 6
+    elif vol_oi >= 3:
+        score += 11
+    elif vol_oi >= 2:
+        score += 7
 
     if MIN_PRICE <= price <= MAX_PRICE:
         score += 6
@@ -187,11 +188,11 @@ def grade_signal(trade: dict) -> tuple[str, str, int]:
     if opening:
         score += 4
 
-    if score >= 75:
+    if score >= 78:
         return "A+ ELITE", "HIGH", score
-    if score >= 60:
+    if score >= 62:
         return "A STRONG", "MEDIUM-HIGH", score
-    if score >= 45:
+    if score >= 48:
         return "B WATCH", "MEDIUM", score
     return "REJECT", "LOW", score
 
@@ -338,17 +339,36 @@ def fetch_flow_alerts() -> list[dict]:
     return []
 
 
+def rank_trade(trade: dict) -> float:
+    premium = parse_float(trade.get("total_premium"))
+    size = parse_int(trade.get("total_size"))
+    volume = parse_int(trade.get("volume"))
+    vol_oi = parse_float(trade.get("volume_oi_ratio"))
+    score = grade_signal(trade)[2]
+
+    # weighted ranking
+    return (
+        score * 1000
+        + premium * 0.01
+        + size * 5
+        + volume * 1.5
+        + vol_oi * 500
+    )
+
+
 def cleanup_sent_contracts() -> None:
     now_ts = time.time()
     expired_keys = [
         key for key, ts in sent_contracts.items()
-        if now_ts - ts > COOLDOWN_SECONDS
+        if now_ts - ts > SEND_WINDOW_SECONDS
     ]
     for key in expired_keys:
         del sent_contracts[key]
 
 
 def main():
+    global last_sent_time
+
     print("Quiet Alpha live flow monitor started.")
 
     while True:
@@ -356,27 +376,30 @@ def main():
             cleanup_sent_contracts()
             trades = fetch_flow_alerts()
 
-            trades = sorted(
-                trades,
-                key=lambda x: x.get("created_at", ""),
-                reverse=False,
-            )
-
+            candidates = []
             for trade in trades:
                 if not passes_filter(trade):
                     continue
 
                 key = build_trade_key(trade)
-                now_ts = time.time()
-                last_sent = sent_contracts.get(key, 0)
-
-                if now_ts - last_sent < COOLDOWN_SECONDS:
+                if key in sent_contracts:
                     continue
 
-                sent_contracts[key] = now_ts
-                msg = format_signal(trade)
-                telegram_send(msg)
-                print(f"Sent signal: {trade.get('option_chain')}")
+                candidates.append(trade)
+
+            if candidates:
+                now_ts = time.time()
+
+                if now_ts - last_sent_time >= SEND_WINDOW_SECONDS:
+                    best_trade = max(candidates, key=rank_trade)
+                    key = build_trade_key(best_trade)
+
+                    sent_contracts[key] = now_ts
+                    last_sent_time = now_ts
+
+                    msg = format_signal(best_trade)
+                    telegram_send(msg)
+                    print(f"Sent best signal: {best_trade.get('option_chain')}")
 
         except Exception as e:
             error_msg = f"Quiet Alpha bot error: {e}"
