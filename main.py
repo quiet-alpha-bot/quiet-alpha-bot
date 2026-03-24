@@ -12,7 +12,7 @@ def calculate_stop(entry: float, stop_pct: float = 0.30) -> float:
 
 
 def calculate_targets(entry: float, magnet_move_points: float, strength: str = "HIGH") -> tuple[float, float, float]:
-    if strength.upper() == "HIGH":
+    if strength.upper() in {"HIGH", "MONSTER"}:
         mult1, mult2, mult3 = 0.06, 0.14, 0.21
     else:
         mult1, mult2, mult3 = 0.05, 0.11, 0.17
@@ -21,6 +21,13 @@ def calculate_targets(entry: float, magnet_move_points: float, strength: str = "
     tp2 = round(entry + (magnet_move_points * mult2), 2)
     tp3 = round(entry + (magnet_move_points * mult3), 2)
     return tp1, tp2, tp3
+
+
+def calculate_extension_targets(current_price: float) -> tuple[float, float, float]:
+    ext1 = round(current_price * 1.20, 2)
+    ext2 = round(current_price * 1.40, 2)
+    ext3 = round(current_price * 1.60, 2)
+    return ext1, ext2, ext3
 
 
 def format_duration(seconds: int) -> tuple[str, str]:
@@ -41,7 +48,6 @@ def is_valid_trade(symbol: str, premium: int, delta: float, expiry: str) -> bool
 def calculate_score(premium: int, magnet_distance: int, delta: float) -> int:
     score = 0
 
-    # Premium score
     if premium >= 1_000_000:
         score += 40
     elif premium >= 500_000:
@@ -49,7 +55,6 @@ def calculate_score(premium: int, magnet_distance: int, delta: float) -> int:
     elif premium >= 300_000:
         score += 20
 
-    # Magnet distance score
     if magnet_distance <= 10:
         score += 30
     elif magnet_distance <= 20:
@@ -57,7 +62,6 @@ def calculate_score(premium: int, magnet_distance: int, delta: float) -> int:
     elif magnet_distance <= 35:
         score += 10
 
-    # Delta score
     if delta >= 0.50:
         score += 25
     elif delta >= 0.40:
@@ -86,6 +90,10 @@ def confidence_label_ar(score: int) -> str:
     if score >= 55:
         return "متوسطة"
     return "منخفضة"
+
+
+def should_send_extension(score: int, current_price: float, tp3: float) -> bool:
+    return score >= 80 and current_price > tp3
 
 
 async def send_trade_alert(
@@ -235,6 +243,42 @@ Continuation is your decision
     )
 
 
+async def send_extension_alert(bot: Bot, chat_id: int, now_price: float) -> None:
+    await bot.send_message(
+        chat_id=chat_id,
+        text=f"""🌊 Quiet Alpha Extension
+موجة كوايت ألفا
+
+Price: {now_price}
+السعر: {now_price}
+
+Momentum remains strong
+الزخم ما زال قويًا
+
+Continuation remains possible
+الامتداد لا يزال قائمًا
+
+Trail your stop
+حرّك وقفك مع الحركة"""
+    )
+
+
+async def send_extension_targets(bot: Bot, chat_id: int, ext1: float, ext2: float, ext3: float) -> None:
+    await bot.send_message(
+        chat_id=chat_id,
+        text=f"""🎯 Quiet Alpha New Targets
+الأهداف الجديدة — كوايت ألفا
+
+EXT1: {ext1}
+EXT2: {ext2}
+EXT3: {ext3}
+
+الهدف الممتد 1: {ext1}
+الهدف الممتد 2: {ext2}
+الهدف الممتد 3: {ext3}"""
+    )
+
+
 async def main():
     if not BOT_TOKEN:
         raise ValueError("BOT_TOKEN is missing")
@@ -244,7 +288,7 @@ async def main():
     bot = Bot(token=BOT_TOKEN)
     chat_id = int(CHAT_ID)
 
-    # Demo trade data for internal testing
+    # Demo trade data
     symbol = "SPXW"
     strike = 5200
     option_type = "CALL"
@@ -261,6 +305,7 @@ async def main():
     price_50 = 5.70
     price_70 = 6.46
     price_100 = 7.60
+    extension_price = 9.20
 
     if not is_valid_trade(symbol, premium, delta, expiry):
         print("Trade rejected by QA filter.")
@@ -306,6 +351,15 @@ async def main():
     await asyncio.sleep(8)
     duration_seconds = int((datetime.now() - entry_time).total_seconds())
     await send_update_100(bot, chat_id, entry, price_100, duration_seconds)
+
+    await asyncio.sleep(8)
+
+    if should_send_extension(score, extension_price, tp3):
+        ext1, ext2, ext3 = calculate_extension_targets(extension_price)
+        await send_extension_alert(bot, chat_id, extension_price)
+
+        await asyncio.sleep(8)
+        await send_extension_targets(bot, chat_id, ext1, ext2, ext3)
 
 
 if __name__ == "__main__":
