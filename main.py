@@ -1,7 +1,6 @@
 import os
 import re
-import math
-from datetime import datetime
+import asyncio
 from telegram import Bot
 from openai import OpenAI
 
@@ -22,24 +21,7 @@ bot = Bot(token=BOT_TOKEN)
 client = OpenAI(api_key=OPENAI_API_KEY)
 
 
-def safe_float(value, default=0.0):
-    try:
-        if value is None:
-            return default
-        if isinstance(value, (int, float)):
-            return float(value)
-        value = str(value).replace(",", "").replace("$", "").strip()
-        return float(value)
-    except Exception:
-        return default
-
-
 def parse_contract(contract_text: str) -> dict:
-    """
-    Example:
-    SPXW 24 MAR 2026 5200 CALL
-    SPXW 24 MAR 2026 5200 PUT
-    """
     text = contract_text.upper().strip()
 
     side = "CALL" if "CALL" in text else "PUT" if "PUT" in text else "UNKNOWN"
@@ -47,13 +29,14 @@ def parse_contract(contract_text: str) -> dict:
     strike_match = re.search(r"\b(\d{3,5})\b(?=\s+(CALL|PUT))", text)
     strike = strike_match.group(1) if strike_match else "N/A"
 
-    dte = "0DTE" if "SPXW" in text else "1DTE"
+    symbol = "SPXW" if "SPXW" in text else "SPX"
+    dte_label = "0DTE" if symbol == "SPXW" else "1DTE"
 
     return {
-        "symbol": "SPXW" if "SPXW" in text else "SPX",
+        "symbol": symbol,
         "side": side,
         "strike": strike,
-        "dte_label": dte,
+        "dte_label": dte_label,
     }
 
 
@@ -191,8 +174,8 @@ def score_signal(data: dict) -> int:
 
 def ai_reason_summary(data: dict, grade: str, score: int) -> str:
     prompt = f"""
-You are generating a short, professional options-flow reason.
-Keep it to one line only.
+You are generating a short professional options-flow reason.
+Keep it one line only.
 
 Data:
 Symbol: {data['symbol']}
@@ -208,18 +191,21 @@ Days To Expiry: {data['days_to_expiry']}
 Grade: {grade}
 Score: {score}
 
-Return a concise reason like:
-Whale flow + strong premium + aggressive momentum
+Return one concise reason only.
 """
+
     try:
         response = client.responses.create(
             model="gpt-5-mini",
             input=prompt,
         )
-        text = response.output_text.strip()
-        return text if text else "Whale flow + strong premium + aggressive momentum"
-    except Exception:
-        return "Whale flow + strong premium + aggressive momentum"
+        text = (response.output_text or "").strip()
+        if text:
+            return text
+    except Exception as e:
+        print(f"OpenAI reason fallback: {e}")
+
+    return "Whale flow + strong premium + aggressive momentum"
 
 
 async def send_signal(data: dict):
@@ -322,10 +308,6 @@ Manage your trade wisely
 
 
 async def demo_run():
-    """
-    هذه نسخة تشغيل أولية.
-    لاحقًا بنبدل demo data بقراءة الإيميل من Unusual Whales.
-    """
     raw_contract = "SPXW 24 MAR 2026 5200 CALL"
     parsed = parse_contract(raw_contract)
 
@@ -354,6 +336,12 @@ async def demo_run():
     await send_smart_exit()
 
 
+def main():
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    loop.run_until_complete(demo_run())
+    loop.close()
+
+
 if __name__ == "__main__":
-    import asyncio
-    asyncio.run(demo_run())
+    main()
