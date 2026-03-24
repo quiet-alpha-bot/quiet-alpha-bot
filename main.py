@@ -164,8 +164,11 @@ Entry: {entry}
 Now: {now_price}
 السعر الآن: {now_price}
 
-Approaching Target 1
-اقتراب من الهدف الأول
+Target 1 within reach
+الهدف الأول قريب
+
+Momentum building
+الزخم يتزايد
 
 Small accounts: consider taking profit
 Large accounts: raise your stop
@@ -189,7 +192,10 @@ Entry: {entry}
 Now: {now_price}
 السعر الآن: {now_price}
 
-Raise stop to +20%
+Position secured
+الصفقة أصبحت مؤمّنة
+
+Adjust stop to +20%
 ارفع وقفك إلى +20%"""
     )
 
@@ -208,11 +214,14 @@ Entry: {entry}
 Now: {now_price}
 السعر الآن: {now_price}
 
-Raise stop to +40%
+Trend holding strong
+الاتجاه ما زال قوي
+
+Adjust stop to +40%
 ارفع وقفك إلى +40%
 
-Trade is moving in your favor
-الصفقة تسير لصالحك"""
+Let it run with control
+اتركها تتحرك مع إدارة"""
     )
 
 
@@ -235,11 +244,14 @@ Now: {now_price}
 Duration: {duration_en}
 مدة الصفقة: {duration_ar}
 
-Successful trade
-صفقة ناجحة
+Execution complete
+تم تنفيذ الصفقة بنجاح
 
-Continuation is your decision
-الاستمرار بالصفقة قرارك"""
+Profit locked
+الربح تحقق
+
+Next move is yours
+القرار الآن بيدك"""
     )
 
 
@@ -252,14 +264,14 @@ async def send_extension_alert(bot: Bot, chat_id: int, now_price: float) -> None
 Price: {now_price}
 السعر: {now_price}
 
-Momentum remains strong
-الزخم ما زال قويًا
+Strong continuation detected
+امتداد قوي تم رصده
 
-Continuation remains possible
-الامتداد لا يزال قائمًا
+Market still pushing in same direction
+السوق مستمر بنفس الاتجاه
 
-Trail your stop
-حرّك وقفك مع الحركة"""
+Trail your stop — do not rush exit
+حرّك وقفك — لا تتعجل الخروج"""
     )
 
 
@@ -275,7 +287,10 @@ EXT3: {ext3}
 
 الهدف الممتد 1: {ext1}
 الهدف الممتد 2: {ext2}
-الهدف الممتد 3: {ext3}"""
+الهدف الممتد 3: {ext3}
+
+Momentum phase active
+مرحلة الزخم مستمرة"""
     )
 
 
