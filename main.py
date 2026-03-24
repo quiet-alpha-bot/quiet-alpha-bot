@@ -1,14 +1,21 @@
 import os
+import asyncio
 from telegram import Bot
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-SIGNAL_CHAT_ID = os.getenv("SIGNAL_CHAT_ID")
-ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID")
+CHAT_ID = os.getenv("SIGNAL_CHAT_ID")
 
-bot = Bot(token=BOT_TOKEN)
+async def main():
+    if not BOT_TOKEN:
+        raise ValueError("BOT_TOKEN is missing")
+    if not CHAT_ID:
+        raise ValueError("SIGNAL_CHAT_ID is missing")
+
+    bot = Bot(token=BOT_TOKEN)
+    await bot.send_message(
+        chat_id=int(CHAT_ID),
+        text="🚀 Quiet Alpha Bot is LIVE!"
+    )
 
 if __name__ == "__main__":
-    if ADMIN_CHAT_ID:
-        bot.send_message(chat_id=ADMIN_CHAT_ID, text="Quiet Alpha System Online ✅")
-    if SIGNAL_CHAT_ID:
-        bot.send_message(chat_id=SIGNAL_CHAT_ID, text="Quiet Alpha Signal Channel Connected ✅")
+    asyncio.run(main())
