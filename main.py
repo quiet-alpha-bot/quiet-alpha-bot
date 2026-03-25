@@ -2,6 +2,7 @@ import os
 import time
 import imaplib
 import email
+import json
 import requests
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -10,6 +11,8 @@ EMAIL_USER = os.getenv("EMAIL_USER")
 EMAIL_PASS = os.getenv("EMAIL_PASS")
 IMAP_SERVER = os.getenv("IMAP_SERVER", "imap.gmail.com")
 POLL_SECONDS = int(os.getenv("POLL_SECONDS", "20"))
+
+STATE_FILE = "state.json"
 
 if not BOT_TOKEN:
     raise ValueError("BOT_TOKEN is missing")
@@ -22,6 +25,25 @@ if not EMAIL_USER:
 
 if not EMAIL_PASS:
     raise ValueError("EMAIL_PASS is missing")
+
+
+def load_state():
+    if os.path.exists(STATE_FILE):
+        with open(STATE_FILE, "r") as f:
+            return json.load(f)
+    return {"last_id": 0}
+
+
+def save_state(state):
+    with open(STATE_FILE, "w") as f:
+        json.dump(state, f)
+
+
+def next_trade_id():
+    state = load_state()
+    state["last_id"] += 1
+    save_state(state)
+    return f"QA-{state['last_id']:03d}"
 
 
 def send_telegram(text: str) -> None:
@@ -50,7 +72,7 @@ def extract_body(msg) -> str:
     return ""
 
 
-def parse_signal(subject: str, body: str) -> dict | None:
+def parse_signal(subject: str, body: str):
     text = f"{subject}\n{body}"
 
     if "SIGNAL: CALL" in text:
@@ -82,9 +104,15 @@ def parse_signal(subject: str, body: str) -> dict | None:
         except Exception:
             pass
 
+    # SPX only filter
+    ticker_upper = ticker.upper()
+    if "SPX" not in ticker_upper:
+        print(f"Skipped non-SPX signal: {ticker}")
+        return None
+
     return {
         "signal": signal,
-        "ticker": ticker,
+        "ticker": "SPX",
         "price": price,
         "time": signal_time,
         "subject": subject,
@@ -92,12 +120,14 @@ def parse_signal(subject: str, body: str) -> dict | None:
 
 
 def format_message(parsed: dict) -> str:
+    trade_id = next_trade_id()
     return (
         "🔥 Quiet Alpha Signal\n\n"
-        f"📊 {parsed['ticker']} {parsed['signal']}\n"
-        f"💰 Entry: {parsed['price']}\n"
-        f"⏰ Time: {parsed['time']}\n\n"
-        "📩 Source: TradingView Email"
+        f"{trade_id}\n"
+        f"{parsed['ticker']} {parsed['signal']}\n"
+        f"Entry: {parsed['price']}\n"
+        f"Time: {parsed['time']}\n\n"
+        "📩 Source: TradingView"
     )
 
 
@@ -136,7 +166,7 @@ def check_email() -> None:
 
 
 def main() -> None:
-    print("Quiet Alpha email bot started ✅")
+    print("Quiet Alpha SPX bot started ✅")
     while True:
         try:
             check_email()
