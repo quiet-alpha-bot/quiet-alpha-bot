@@ -1,64 +1,127 @@
 import os
 import time
+import imaplib
+import email
 import requests
 
+# =========================
+# 🔐 Environment Variables
+# =========================
+EMAIL_USER = os.getenv("EMAIL_USER")
+EMAIL_PASS = os.getenv("EMAIL_PASS")
+IMAP_SERVER = os.getenv("IMAP_SERVER", "imap.gmail.com")
+
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-SIGNAL_CHAT_ID = os.getenv("SIGNAL_CHAT_ID")
+CHAT_ID = os.getenv("SIGNAL_CHAT_ID")
+
 UW_API_KEY = os.getenv("UW_API_KEY")
 
+POLL_SECONDS = int(os.getenv("POLL_SECONDS", "15"))
 
-def send_telegram(text: str):
+# =========================
+# 📩 Telegram Sender
+# =========================
+def send_telegram(msg):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-    try:
-        r = requests.post(
-            url,
-            data={"chat_id": SIGNAL_CHAT_ID, "text": text},
-            timeout=15
-        )
-        print("Telegram status:", r.status_code)
-        print("Telegram response:", r.text[:300])
-    except Exception as e:
-        print("Telegram send error:", repr(e))
-
-
-def fetch_uw():
-    url = "https://api.unusualwhales.com/api/option-alerts"
-    headers = {
-        "Authorization": f"Bearer {UW_API_KEY}",
-        "Accept": "application/json"
+    data = {
+        "chat_id": CHAT_ID,
+        "text": msg
     }
+    r = requests.post(url, data=data)
+    print("Telegram status:", r.status_code)
+    print("Telegram response:", r.text)
 
+# =========================
+# 📧 TradingView Email Reader
+# =========================
+def check_email():
     try:
-        r = requests.get(url, headers=headers, timeout=15)
+        mail = imaplib.IMAP4_SSL(IMAP_SERVER)
+        mail.login(EMAIL_USER, EMAIL_PASS)
+        mail.select("inbox")
 
-        print("=" * 80)
-        print("UW STATUS:", r.status_code)
-        print("UW RAW TEXT:")
-        print(r.text[:1500])
-        print("=" * 80)
+        status, messages = mail.search(None, '(UNSEEN)')
+        mail_ids = messages[0].split()
 
-        try:
-            data = r.json()
-            print("UW JSON TYPE:", type(data))
-            print("UW JSON PREVIEW:", str(data)[:1500])
-        except Exception as json_error:
-            print("UW JSON PARSE ERROR:", repr(json_error))
+        for num in mail_ids[-5:]:
+            status, data = mail.fetch(num, '(RFC822)')
+            msg = email.message_from_bytes(data[0][1])
 
-        return None
+            subject = msg["subject"]
+
+            body = ""
+            if msg.is_multipart():
+                for part in msg.walk():
+                    if part.get_content_type() == "text/plain":
+                        body = part.get_payload(decode=True).decode(errors="ignore")
+            else:
+                body = msg.get_payload(decode=True).decode(errors="ignore")
+
+            text = f"🔥 Quiet Alpha Signal\n\n📩 {subject}\n\n{body[:300]}"
+            send_telegram(text)
+
+        mail.logout()
 
     except Exception as e:
-        print("UW EXCEPTION:", repr(e))
-        return None
+        print("Email Error:", e)
 
+# =========================
+# 🐋 Unusual Whales Fetch
+# =========================
+def check_uw():
+    try:
+        url = "https://api.unusualwhales.com/api/alerts"  # ✅ FIXED
 
+        headers = {
+            "Authorization": f"Bearer {UW_API_KEY}"
+        }
+
+        r = requests.get(url, headers=headers)
+
+        print("UW STATUS:", r.status_code)
+        print("UW RAW TEXT:", r.text[:500])
+
+        if r.status_code != 200:
+            send_telegram(f"⚠️ UW ERROR: {r.status_code}")
+            return
+
+        data = r.json()
+
+        if isinstance(data, dict) and "data" in data:
+            alerts = data["data"]
+        else:
+            alerts = data
+
+        if not alerts:
+            print("No UW alerts")
+            return
+
+        for alert in alerts[:3]:
+            symbol = alert.get("symbol", "N/A")
+            strike = alert.get("strike", "N/A")
+            option_type = alert.get("type", "N/A")
+            premium = alert.get("premium", "N/A")
+
+            msg = f"""🐋 UW FLOW
+
+📊 {symbol}
+🎯 Strike: {strike}
+📌 Type: {option_type}
+💰 Premium: {premium}
+"""
+            send_telegram(msg)
+
+    except Exception as e:
+        print("UW Error:", e)
+        send_telegram(f"❌ UW Exception: {str(e)}")
+
+# =========================
+# 🚀 Main Loop
+# =========================
 if __name__ == "__main__":
-    print("🐋 UW debug bot started")
-    send_telegram("🐋 UW debug bot started")
+    send_telegram("✅ Quiet Alpha bot started")
 
     while True:
-        try:
-            fetch_uw()
-        except Exception as e:
-            print("MAIN LOOP ERROR:", repr(e))
-
-        time.sleep(30)
+        check_email()
+        check_uw()
+        time.sleep(POLL_SECONDS)
