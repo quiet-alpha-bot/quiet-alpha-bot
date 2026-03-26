@@ -4,6 +4,7 @@ import time
 import imaplib
 import email
 from email.header import decode_header
+from datetime import datetime, timedelta
 import requests
 
 # =========================
@@ -19,9 +20,19 @@ UW_API_KEY = os.getenv("UW_API_KEY")
 
 POLL_SECONDS = int(os.getenv("POLL_SECONDS", "20"))
 
-# منع التكرار
+# =========================
+# FILTER SETTINGS
+# =========================
+ONLY_SPX = True
+DEDUP_MINUTES = 10
+MIN_PREMIUM_SIGNAL = 100000
+MIN_PREMIUM_WATCH = 25000
+
+# =========================
+# MEMORY
+# =========================
 seen_tv_subjects = set()
-seen_uw_ids = set()
+recent_uw_contracts = {}  # contract -> last sent datetime
 
 
 # =========================
@@ -44,6 +55,29 @@ def send_telegram(msg: str):
 # =========================
 # HELPERS
 # =========================
+def now_utc():
+    return datetime.utcnow()
+
+
+def cleanup_recent_uw():
+    cutoff = now_utc() - timedelta(minutes=DEDUP_MINUTES)
+    expired = [k for k, v in recent_uw_contracts.items() if v < cutoff]
+    for k in expired:
+        del recent_uw_contracts[k]
+
+
+def was_recently_sent(contract: str) -> bool:
+    cleanup_recent_uw()
+    if not contract:
+        return False
+    return contract in recent_uw_contracts
+
+
+def mark_sent(contract: str):
+    if contract:
+        recent_uw_contracts[contract] = now_utc()
+
+
 def decode_mime(value):
     if not value:
         return ""
@@ -91,13 +125,25 @@ def normalize_side(value: str) -> str:
     return v
 
 
+def format_money(value):
+    if value in (None, "", "N/A"):
+        return "N/A"
+    try:
+        num = float(value)
+        if num.is_integer():
+            return f"{int(num):,}"
+        return f"{num:,.2f}"
+    except Exception:
+        return str(value)
+
+
 def extract_strike_from_contract(contract: str):
     if not contract:
         return "N/A"
 
     contract = contract.upper()
 
-    # مثال OCC: SPXW260326P06550000
+    # مثال: SPXW260326P06550000
     m = re.search(r"[CP](\d{8})$", contract)
     if m:
         raw = m.group(1)
@@ -152,6 +198,32 @@ def extract_symbol_from_contract(contract: str):
 
     m = re.match(r"([A-Z]+)", upper)
     return m.group(1) if m else "N/A"
+
+
+def is_spx_symbol(symbol: str, contract: str) -> bool:
+    combined = f"{symbol} {contract}".upper()
+    return "SPX" in combined
+
+
+def classify_uw(symbol: str, premium):
+    if ONLY_SPX and "SPX" not in str(symbol).upper():
+        return "SKIP"
+
+    try:
+        p = float(premium)
+    except Exception:
+        p = None
+
+    if p is None:
+        return "WATCH"
+
+    if p >= MIN_PREMIUM_SIGNAL:
+        return "SIGNAL"
+
+    if p >= MIN_PREMIUM_WATCH:
+        return "WATCH"
+
+    return "SKIP"
 
 
 # =========================
@@ -262,17 +334,6 @@ def check_uw():
             return
 
         for alert in alerts[:10]:
-            alert_id = str(
-                alert.get("id")
-                or alert.get("_id")
-                or alert.get("uuid")
-                or alert.get("option_id")
-                or f"{alert.get('contract')}_{alert.get('created_at')}_{alert.get('premium')}"
-            )
-
-            if alert_id in seen_uw_ids:
-                continue
-
             option = alert.get("option", {}) or {}
 
             contract = (
@@ -283,6 +344,10 @@ def check_uw():
                 or alert.get("symbol")
                 or ""
             )
+
+            if was_recently_sent(contract):
+                print("UW duplicate skipped:", contract)
+                continue
 
             symbol = (
                 alert.get("symbol")
@@ -310,6 +375,10 @@ def check_uw():
                 or extract_type_from_contract(contract)
             )
 
+            if ONLY_SPX and not is_spx_symbol(symbol, contract):
+                print("UW skipped non-SPX:", symbol, contract)
+                continue
+
             premium = (
                 alert.get("premium")
                 or alert.get("value")
@@ -320,32 +389,50 @@ def check_uw():
 
             # fallback حسابي
             if not premium:
-                price = alert.get("price")
-                size = alert.get("size") or alert.get("volume")
+                price = (
+                    alert.get("price")
+                    or option.get("price")
+                    or option.get("mark")
+                    or option.get("last")
+                )
+                size = (
+                    alert.get("size")
+                    or alert.get("volume")
+                    or option.get("size")
+                    or option.get("volume")
+                )
 
                 if price and size:
                     try:
-                        premium = round(float(price) * float(size), 2)
+                        premium = round(float(price) * float(size) * 100, 2)
                     except Exception:
-                        premium = "N/A"
+                        premium = None
 
             if not premium:
                 premium = "N/A"
 
-            msg = f"""🐋 UW FLOW
+            grade = classify_uw(symbol, premium)
+
+            if grade == "SKIP":
+                print("UW skipped low quality:", contract, premium)
+                continue
+
+            emoji = "🔥" if grade == "SIGNAL" else "🟡"
+            label = "Quiet Alpha Signal" if grade == "SIGNAL" else "Quiet Alpha Watch"
+
+            msg = f"""{emoji} {label}
 
 📊 {symbol}
 🎯 Strike: {strike}
 📌 Type: {option_type}
-💰 Premium: {premium}
+💰 Premium: {format_money(premium)}
 🧾 Contract: {contract or 'N/A'}
 
-⚡ Quiet Alpha Flow Insight
-"""
+⚡ Quiet Alpha Flow Insight"""
 
             send_telegram(msg)
-            seen_uw_ids.add(alert_id)
-            print("UW sent:", alert_id)
+            mark_sent(contract)
+            print("UW sent:", contract, premium, grade)
             break
 
     except Exception as e:
@@ -356,7 +443,7 @@ def check_uw():
 # MAIN
 # =========================
 if __name__ == "__main__":
-    send_telegram("✅ Quiet Alpha bot started")
+    send_telegram("✅ Quiet Alpha V2 bot started")
 
     while True:
         check_email()
