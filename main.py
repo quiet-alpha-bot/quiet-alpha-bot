@@ -19,7 +19,7 @@ UW_API_KEY = os.getenv("UW_API_KEY")
 
 POLL_SECONDS = int(os.getenv("POLL_SECONDS", "20"))
 
-# منع تكرار رسائل TV و UW
+# منع التكرار
 seen_tv_subjects = set()
 seen_uw_ids = set()
 
@@ -175,6 +175,65 @@ def check_email():
 # =========================
 # UW API
 # =========================
+def extract_strike_from_contract(contract: str):
+    if not contract:
+        return "N/A"
+
+    # نمط OCC مثل SPXW260326P06550000
+    m = re.search(r"[CP](\d{8})$", contract)
+    if m:
+        raw = m.group(1)
+        try:
+            strike_val = int(raw) / 1000
+            if strike_val.is_integer():
+                return str(int(strike_val))
+            return str(strike_val)
+        except Exception:
+            pass
+
+    # fallback
+    m2 = re.search(r"(\d{4,5})(?:\D*)$", contract)
+    if m2:
+        return m2.group(1)
+
+    return "N/A"
+
+
+def extract_type_from_contract(contract: str):
+    if not contract:
+        return "N/A"
+
+    m = re.search(r"([CP])\d{8}$", contract)
+    if m:
+        return "CALL" if m.group(1) == "C" else "PUT"
+
+    if "CALL" in contract.upper():
+        return "CALL"
+    if "PUT" in contract.upper():
+        return "PUT"
+
+    return "N/A"
+
+
+def extract_symbol_from_contract(contract: str):
+    if not contract:
+        return "N/A"
+
+    upper = contract.upper()
+
+    if upper.startswith("SPXW"):
+        return "SPXW"
+    if upper.startswith("SPX"):
+        return "SPX"
+    if upper.startswith("QQQ"):
+        return "QQQ"
+    if upper.startswith("NDX"):
+        return "NDX"
+
+    m = re.match(r"([A-Z]+)", upper)
+    return m.group(1) if m else "N/A"
+
+
 def check_uw():
     try:
         url = "https://api.unusualwhales.com/api/alerts"
@@ -204,7 +263,7 @@ def check_uw():
                 or alert.get("_id")
                 or alert.get("uuid")
                 or alert.get("option_id")
-                or f"{alert.get('premium')}_{alert.get('created_at')}_{alert.get('symbol')}"
+                or f"{alert.get('contract')}_{alert.get('created_at')}_{alert.get('premium')}"
             )
 
             if alert_id in seen_uw_ids:
@@ -212,13 +271,22 @@ def check_uw():
 
             option = alert.get("option", {}) or {}
 
-            # قراءة مرنة للحقل
+            contract = (
+                alert.get("contract")
+                or alert.get("option_symbol")
+                or option.get("contract")
+                or option.get("symbol")
+                or alert.get("symbol")
+                or ""
+            )
+
             symbol = (
                 alert.get("symbol")
                 or alert.get("ticker")
                 or alert.get("underlying")
                 or option.get("symbol")
                 or option.get("ticker")
+                or extract_symbol_from_contract(contract)
                 or "N/A"
             )
 
@@ -226,15 +294,18 @@ def check_uw():
                 alert.get("strike")
                 or option.get("strike")
                 or option.get("strike_price")
+                or extract_strike_from_contract(contract)
                 or "N/A"
             )
 
-            option_type = normalize_side(
-                alert.get("type")
-                or alert.get("side")
-                or option.get("type")
-                or option.get("side")
-                or ""
+            option_type = (
+                normalize_side(
+                    alert.get("type")
+                    or alert.get("side")
+                    or option.get("type")
+                    or option.get("side")
+                    or extract_type_from_contract(contract)
+                )
             )
 
             premium = (
@@ -242,14 +313,8 @@ def check_uw():
                 or alert.get("value")
                 or alert.get("total_premium")
                 or alert.get("notional")
+                or alert.get("price")
                 or "N/A"
-            )
-
-            contract = (
-                alert.get("contract")
-                or option.get("contract")
-                or option.get("symbol")
-                or symbol
             )
 
             msg = f"""🐋 UW FLOW
@@ -258,7 +323,7 @@ def check_uw():
 🎯 Strike: {strike}
 📌 Type: {option_type}
 💰 Premium: {premium}
-🧾 Contract: {contract}
+🧾 Contract: {contract or 'N/A'}
 """
 
             send_telegram(msg)
