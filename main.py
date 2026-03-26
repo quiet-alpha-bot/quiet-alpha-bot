@@ -315,14 +315,22 @@ def check_uw():
                 or alert.get("value")
                 or alert.get("total_premium")
                 or alert.get("notional")
-                or alert.get("price")
-                or alert.get("size")
-                or alert.get("volume")
-                or alert.get("cost_basis")
                 or alert.get("transaction_value")
-                or alert.get("amount")
-                or "N/A"
             )
+
+            # fallback حسابي
+            if not premium:
+                price = alert.get("price")
+                size = alert.get("size") or alert.get("volume")
+
+                if price and size:
+                    try:
+                        premium = round(float(price) * float(size), 2)
+                    except Exception:
+                        premium = "N/A"
+
+            if not premium:
+                premium = "N/A"
 
             msg = f"""🐋 UW FLOW
 
