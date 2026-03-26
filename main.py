@@ -1,11 +1,13 @@
 import os
+import re
 import time
 import imaplib
 import email
+from email.header import decode_header
 import requests
 
 # =========================
-# 🔐 Environment Variables
+# ENV
 # =========================
 EMAIL_USER = os.getenv("EMAIL_USER")
 EMAIL_PASS = os.getenv("EMAIL_PASS")
@@ -13,76 +15,170 @@ IMAP_SERVER = os.getenv("IMAP_SERVER", "imap.gmail.com")
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = os.getenv("SIGNAL_CHAT_ID")
-
 UW_API_KEY = os.getenv("UW_API_KEY")
 
-POLL_SECONDS = int(os.getenv("POLL_SECONDS", "15"))
+POLL_SECONDS = int(os.getenv("POLL_SECONDS", "20"))
+
+# منع تكرار رسائل TV و UW
+seen_tv_subjects = set()
+seen_uw_ids = set()
+
 
 # =========================
-# 📩 Telegram Sender
+# TELEGRAM
 # =========================
-def send_telegram(msg):
+def send_telegram(msg: str):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-    data = {
-        "chat_id": CHAT_ID,
-        "text": msg
-    }
-    r = requests.post(url, data=data)
-    print("Telegram status:", r.status_code)
-    print("Telegram response:", r.text)
+    try:
+        r = requests.post(
+            url,
+            data={"chat_id": CHAT_ID, "text": msg},
+            timeout=15
+        )
+        print("Telegram status:", r.status_code)
+        print("Telegram response:", r.text[:300])
+    except Exception as e:
+        print("Telegram send error:", repr(e))
+
 
 # =========================
-# 📧 TradingView Email Reader
+# HELPERS
 # =========================
+def decode_mime(value):
+    if not value:
+        return ""
+    parts = []
+    for part, enc in decode_header(value):
+        if isinstance(part, bytes):
+            parts.append(part.decode(enc or "utf-8", errors="ignore"))
+        else:
+            parts.append(part)
+    return "".join(parts)
+
+
+def extract_email_body(msg):
+    body = ""
+    if msg.is_multipart():
+        for part in msg.walk():
+            ctype = part.get_content_type()
+            disp = str(part.get("Content-Disposition") or "")
+            if ctype in ("text/plain", "text/html") and "attachment" not in disp.lower():
+                payload = part.get_payload(decode=True)
+                if payload:
+                    body += "\n" + payload.decode(errors="ignore")
+    else:
+        payload = msg.get_payload(decode=True)
+        if payload:
+            body = payload.decode(errors="ignore")
+    return body
+
+
+def strip_html(html: str) -> str:
+    text = re.sub(r"<br\s*/?>", "\n", html, flags=re.I)
+    text = re.sub(r"</p>", "\n", text, flags=re.I)
+    text = re.sub(r"<[^>]+>", "", text)
+    return text
+
+
+# =========================
+# TV EMAIL
+# =========================
+def parse_tv_email(subject: str, body: str):
+    text = strip_html(body)
+
+    signal_match = re.search(r"SIGNAL:\s*(CALL|PUT)", text, re.I)
+    ticker_match = re.search(r"TICKER:\s*([A-Z0-9_]+)", text, re.I)
+    price_match = re.search(r"PRICE:\s*([0-9]+(?:\.[0-9]+)?)", text, re.I)
+
+    side = signal_match.group(1).upper() if signal_match else None
+    ticker = ticker_match.group(1).upper() if ticker_match else "SPX500"
+    price = price_match.group(1) if price_match else "N/A"
+
+    if not side:
+        return None
+
+    return side, ticker, price
+
+
 def check_email():
     try:
         mail = imaplib.IMAP4_SSL(IMAP_SERVER)
         mail.login(EMAIL_USER, EMAIL_PASS)
         mail.select("inbox")
 
-        status, messages = mail.search(None, '(UNSEEN)')
-        mail_ids = messages[0].split()
+        status, data = mail.search(None, "ALL")
+        print("Email search:", status)
 
-        for num in mail_ids[-5:]:
-            status, data = mail.fetch(num, '(RFC822)')
-            msg = email.message_from_bytes(data[0][1])
+        if status != "OK":
+            mail.logout()
+            return
 
-            subject = msg["subject"]
+        mail_ids = data[0].split()
+        latest_ids = mail_ids[-10:]
 
-            body = ""
-            if msg.is_multipart():
-                for part in msg.walk():
-                    if part.get_content_type() == "text/plain":
-                        body = part.get_payload(decode=True).decode(errors="ignore")
-            else:
-                body = msg.get_payload(decode=True).decode(errors="ignore")
+        for mail_id in reversed(latest_ids):
+            status, msg_data = mail.fetch(mail_id, "(RFC822)")
+            if status != "OK":
+                continue
 
-            text = f"🔥 Quiet Alpha Signal\n\n📩 {subject}\n\n{body[:300]}"
+            raw = msg_data[0][1]
+            msg = email.message_from_bytes(raw)
+
+            subject = decode_mime(msg.get("Subject"))
+            from_addr = decode_mime(msg.get("From"))
+            body = extract_email_body(msg)
+
+            if "tradingview" not in from_addr.lower():
+                continue
+
+            if "QA_" not in subject and "SIGNAL:" not in body:
+                continue
+
+            if subject in seen_tv_subjects:
+                continue
+
+            parsed = parse_tv_email(subject, body)
+            if not parsed:
+                continue
+
+            side, ticker, price = parsed
+
+            text = f"""🔥 Quiet Alpha Signal
+
+📊 {ticker} {side}
+💰 Entry: {price}
+
+✉️ Source: TradingView Email"""
+
             send_telegram(text)
+            seen_tv_subjects.add(subject)
+            print("TV sent:", subject)
+            break
 
         mail.logout()
 
     except Exception as e:
-        print("Email Error:", e)
+        print("Email Error:", repr(e))
+
 
 # =========================
-# 🐋 Unusual Whales Fetch
+# UW API
 # =========================
 def check_uw():
     try:
-        url = "https://api.unusualwhales.com/api/alerts"  # ✅ FIXED
-
+        url = "https://api.unusualwhales.com/api/alerts"
         headers = {
-            "Authorization": f"Bearer {UW_API_KEY}"
+            "Authorization": f"Bearer {UW_API_KEY}",
+            "Accept": "application/json"
         }
 
-        r = requests.get(url, headers=headers)
+        r = requests.get(url, headers=headers, timeout=15)
 
         print("UW STATUS:", r.status_code)
         print("UW RAW TEXT:", r.text[:500])
 
         if r.status_code != 200:
-            send_telegram(f"⚠️ UW ERROR: {r.status_code}")
+            print("UW non-200 response")
             return
 
         data = r.json()
@@ -96,10 +192,24 @@ def check_uw():
             print("No UW alerts")
             return
 
-        for alert in alerts[:3]:
-            symbol = alert.get("symbol", "N/A")
-            strike = alert.get("strike", "N/A")
-            option_type = alert.get("type", "N/A")
+        for alert in alerts[:5]:
+            # مفتاح فريد لمنع التكرار
+            alert_id = str(
+                alert.get("id")
+                or alert.get("_id")
+                or alert.get("uuid")
+                or alert.get("option_id")
+                or f"{alert.get('premium')}_{alert.get('created_at')}"
+            )
+
+            if alert_id in seen_uw_ids:
+                continue
+
+            option = alert.get("option", {}) or {}
+
+            symbol = option.get("symbol", "N/A")
+            strike = option.get("strike", "N/A")
+            option_type = option.get("type", "N/A")
             premium = alert.get("premium", "N/A")
 
             msg = f"""🐋 UW FLOW
@@ -109,14 +219,18 @@ def check_uw():
 📌 Type: {option_type}
 💰 Premium: {premium}
 """
+
             send_telegram(msg)
+            seen_uw_ids.add(alert_id)
+            print("UW sent:", alert_id)
+            break
 
     except Exception as e:
-        print("UW Error:", e)
-        send_telegram(f"❌ UW Exception: {str(e)}")
+        print("UW Error:", repr(e))
+
 
 # =========================
-# 🚀 Main Loop
+# MAIN
 # =========================
 if __name__ == "__main__":
     send_telegram("✅ Quiet Alpha bot started")
