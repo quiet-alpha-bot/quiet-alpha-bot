@@ -27,29 +27,15 @@ ONLY_SPX = True
 TV_SIGNAL_MAX_AGE_MINUTES = 20
 DEDUP_MINUTES = 10
 
-# إذا premium غير موجود، نخليها تمر للتجربة
+# إذا UW ما رجّع premium نخليه يمر
 ALLOW_NA_PREMIUM_MATCH = True
 
 # =========================
 # MEMORY
 # =========================
 seen_tv_subjects = set()
-recent_sent_contracts = {}   # contract -> datetime
-latest_tv_signal = None      # {"side","ticker","price","time","subject"}
-
-# تتبع العقود المفتوحة للتحديثات
-tracked_contracts = {
-    # contract: {
-    #   "entry": float,
-    #   "side": "CALL"/"PUT",
-    #   "ticker": "SPX500",
-    #   "strike": "6550",
-    #   "premium": value,
-    #   "last_price": float,
-    #   "milestones_sent": {30,50,70,100},
-    #   "created_at": datetime
-    # }
-}
+recent_sent_contracts = {}
+latest_tv_signal = None
 
 # =========================
 # TELEGRAM
@@ -145,7 +131,7 @@ def format_price(value):
     if value in (None, "", "N/A"):
         return "N/A"
     try:
-        return f"{float(value):.2f}"
+        return f"{float(value):.2f}".rstrip("0").rstrip(".") if "." in f"{float(value):.2f}" else f"{float(value):.2f}"
     except Exception:
         return str(value)
 
@@ -162,6 +148,8 @@ def extract_strike_from_contract(contract: str):
         return "N/A"
 
     contract = contract.upper()
+
+    # مثال OCC: SPXW260324P06590000
     m = re.search(r"[CP](\d{8})$", contract)
     if m:
         raw = m.group(1)
@@ -190,11 +178,13 @@ def extract_type_from_contract(contract: str):
         return "CALL"
     if "PUT" in contract:
         return "PUT"
+
     return "N/A"
 
 def extract_symbol_from_contract(contract: str):
     if not contract:
         return "N/A"
+
     upper = contract.upper()
     if upper.startswith("SPXW"):
         return "SPXW"
@@ -204,8 +194,23 @@ def extract_symbol_from_contract(contract: str):
         return "QQQ"
     if upper.startswith("NDX"):
         return "NDX"
+
     m = re.match(r"([A-Z]+)", upper)
     return m.group(1) if m else "N/A"
+
+def extract_expiry_from_contract(contract: str):
+    if not contract:
+        return "N/A"
+
+    m = re.search(r"(\d{6})[CP]\d{8}$", contract.upper())
+    if not m:
+        return "N/A"
+
+    raw = m.group(1)  # YYMMDD
+    yy = int(raw[:2]) + 2000
+    mm = raw[2:4]
+    dd = raw[4:6]
+    return f"{yy}-{mm}-{dd}"
 
 def is_spx_symbol(symbol: str, contract: str) -> bool:
     return "SPX" in f"{symbol} {contract}".upper()
@@ -222,24 +227,62 @@ def compute_targets(entry):
             "tp1": round(e * 1.30, 2),
             "tp2": round(e * 1.50, 2),
             "tp3": round(e * 2.00, 2),
-            "sl": round(e * 0.70, 2),
+            "sl": round(e * 0.65, 2),
         }
     except Exception:
         return {"tp1": "N/A", "tp2": "N/A", "tp3": "N/A", "sl": "N/A"}
 
-def strength_from_premium(premium):
+def derive_confidence_and_score(premium, vol_oi, sweep, rule):
+    score = 60
+
     p = parse_float_or_none(premium)
-    if p is None:
-        return ("MEDIUM", 65)
-    if p >= 500000:
-        return ("VERY HIGH", 95)
-    if p >= 250000:
-        return ("HIGH", 88)
-    if p >= 100000:
-        return ("MEDIUM-HIGH", 78)
-    if p >= 25000:
-        return ("MEDIUM", 68)
-    return ("LOW", 55)
+    v = parse_float_or_none(vol_oi)
+
+    if p is not None:
+        if p >= 500000:
+            score += 15
+        elif p >= 250000:
+            score += 10
+        elif p >= 100000:
+            score += 7
+
+    if v is not None:
+        if v >= 5:
+            score += 10
+        elif v >= 2:
+            score += 6
+
+    if str(sweep).upper() in ["YES", "TRUE", "1"]:
+        score += 5
+
+    if "REPEATED" in str(rule).upper():
+        score += 5
+
+    score = max(1, min(score, 99))
+
+    if score >= 85:
+        confidence = "HIGH"
+        grade = "A+ STRONG"
+    elif score >= 72:
+        confidence = "MEDIUM-HIGH"
+        grade = "A STRONG"
+    elif score >= 60:
+        confidence = "MEDIUM"
+        grade = "B"
+    else:
+        confidence = "LOW"
+        grade = "C"
+
+    return confidence, grade, score
+
+def build_reason(uw):
+    vol_oi_text = uw["vol_oi"] if uw["vol_oi"] != "N/A" else "N/A"
+    direction_text = "upside exposure" if uw["type"] == "CALL" else "downside exposure"
+    return (
+        f"Repeated high-volume hits (V/OI ~{vol_oi_text}) on this long-dated "
+        f"SPX {uw['strike']} {uw['type'].lower()} suggest aggressive position-taking "
+        f"for {direction_text} or institutional hedging."
+    )
 
 # =========================
 # TV EMAIL
@@ -290,8 +333,10 @@ def check_email():
 
             if "tradingview" not in from_addr.lower():
                 continue
+
             if "QA_" not in subject and "SIGNAL:" not in body:
                 continue
+
             if subject in seen_tv_subjects:
                 continue
 
@@ -318,7 +363,7 @@ def check_email():
         print("Email Error:", repr(e))
 
 # =========================
-# UW PARSE
+# UW
 # =========================
 def fetch_uw_alerts():
     url = "https://api.unusualwhales.com/api/alerts"
@@ -329,6 +374,7 @@ def fetch_uw_alerts():
 
     r = requests.get(url, headers=headers, timeout=15)
     print("UW STATUS:", r.status_code)
+
     if r.status_code != 200:
         print("UW RAW TEXT:", r.text[:500])
         return []
@@ -382,28 +428,87 @@ def parse_uw_alert(alert):
         or alert.get("transaction_value")
     )
 
+    size = (
+        alert.get("size")
+        or alert.get("contracts")
+        or option.get("size")
+        or option.get("contracts")
+        or "N/A"
+    )
+
+    volume = (
+        alert.get("volume")
+        or option.get("volume")
+        or "N/A"
+    )
+
+    oi = (
+        alert.get("oi")
+        or alert.get("open_interest")
+        or option.get("oi")
+        or option.get("open_interest")
+        or "N/A"
+    )
+
+    vol_oi = (
+        alert.get("vol_oi")
+        or alert.get("vol_oi_ratio")
+        or "N/A"
+    )
+
+    if vol_oi == "N/A":
+        vol = parse_float_or_none(volume)
+        oi_num = parse_float_or_none(oi)
+        if vol is not None and oi_num not in (None, 0):
+            vol_oi = round(vol / oi_num, 2)
+
+    sweep = (
+        alert.get("sweep")
+        or alert.get("is_sweep")
+        or "NO"
+    )
+    sweep = "YES" if str(sweep).upper() in ["YES", "TRUE", "1"] else "NO"
+
+    rule = (
+        alert.get("rule")
+        or alert.get("rule_name")
+        or "RepeatedHits"
+    )
+
     live_price = (
         alert.get("price")
         or option.get("price")
         or option.get("mark")
         or option.get("last")
+        or "N/A"
     )
-
-    size = (
-        alert.get("size")
-        or alert.get("volume")
-        or option.get("size")
-        or option.get("volume")
-    )
-
-    if not premium and live_price and size:
-        try:
-            premium = round(float(live_price) * float(size) * 100, 2)
-        except Exception:
-            premium = "N/A"
 
     if not premium:
-        premium = "N/A"
+        p = parse_float_or_none(live_price)
+        s = parse_float_or_none(size)
+        if p is not None and s is not None:
+            premium = round(p * s * 100, 2)
+        else:
+            premium = "N/A"
+
+    expiry = (
+        alert.get("expiry")
+        or option.get("expiry")
+        or extract_expiry_from_contract(contract)
+    )
+
+    # لو UW رجعها مباشرة، نستخدمها
+    confidence = alert.get("confidence")
+    grade = alert.get("grade")
+    score = alert.get("score")
+
+    targets = alert.get("targets") or {}
+    tp1 = targets.get("tp1")
+    tp2 = targets.get("tp2")
+    tp3 = targets.get("tp3")
+
+    stop = alert.get("stop") or alert.get("stop_loss")
+    reason = alert.get("reason")
 
     return {
         "contract": contract,
@@ -411,57 +516,24 @@ def parse_uw_alert(alert):
         "strike": strike,
         "type": option_type,
         "premium": premium,
-        "live_price": live_price if live_price else "N/A",
-        "size": size if size else "N/A",
+        "size": size,
+        "volume": volume,
+        "oi": oi,
+        "vol_oi": vol_oi,
+        "sweep": sweep,
+        "rule": rule,
+        "expiry": expiry,
+        "live_price": live_price,
+        "confidence": confidence,
+        "grade": grade,
+        "score": score,
+        "tp1": tp1,
+        "tp2": tp2,
+        "tp3": tp3,
+        "stop": stop,
+        "reason": reason,
     }
 
-# =========================
-# TRACKING / UPDATES
-# =========================
-def maybe_send_contract_update(contract_data):
-    contract = contract_data["contract"]
-    current_price = parse_float_or_none(contract_data["live_price"])
-
-    if contract not in tracked_contracts:
-        return
-
-    if current_price is None:
-        return
-
-    tracked = tracked_contracts[contract]
-    entry = tracked["entry"]
-
-    if entry is None or entry <= 0:
-        return
-
-    gain_pct = ((current_price - entry) / entry) * 100
-
-    milestones = [
-        (30, "✅ +30%"),
-        (50, "🔥 +50%"),
-        (70, "🚀 +70%"),
-        (100, "🎉 +100%")
-    ]
-
-    for level, label in milestones:
-        if gain_pct >= level and level not in tracked["milestones_sent"]:
-            msg = f"""{label} Quiet Alpha Update
-
-📊 {tracked['ticker']} {tracked['side']}
-🧾 Contract: {contract}
-💰 Entry: {format_price(entry)}
-📈 Current: {format_price(current_price)}
-📊 Gain: {gain_pct:.2f}%
-
-⚡ Strength: {tracked['strength']}
-🎯 Next focus: manage risk and trail wisely
-"""
-            send_telegram(msg)
-            tracked["milestones_sent"].add(level)
-
-# =========================
-# UW + TV MATCH
-# =========================
 def check_uw():
     try:
         alerts = fetch_uw_alerts()
@@ -470,16 +542,14 @@ def check_uw():
             return
 
         for raw_alert in alerts[:10]:
-            alert = parse_uw_alert(raw_alert)
-            contract = alert["contract"]
+            uw = parse_uw_alert(raw_alert)
+            contract = uw["contract"]
 
             if not contract:
                 continue
 
-            if ONLY_SPX and not is_spx_symbol(alert["symbol"], contract):
+            if ONLY_SPX and not is_spx_symbol(uw["symbol"], contract):
                 continue
-
-            maybe_send_contract_update(alert)
 
             if was_recently_sent(contract):
                 print("UW duplicate skipped:", contract)
@@ -493,11 +563,11 @@ def check_uw():
                 print("UW skipped: TV signal stale")
                 continue
 
-            if latest_tv_signal["side"] != alert["type"]:
-                print("UW skipped: side mismatch", latest_tv_signal["side"], alert["type"])
+            if latest_tv_signal["side"] != uw["type"]:
+                print("UW skipped: side mismatch", latest_tv_signal["side"], uw["type"])
                 continue
 
-            premium_num = parse_float_or_none(alert["premium"])
+            premium_num = parse_float_or_none(uw["premium"])
             if premium_num is None and not ALLOW_NA_PREMIUM_MATCH:
                 print("UW skipped: premium missing")
                 continue
@@ -507,48 +577,69 @@ def check_uw():
                 print("UW skipped: invalid TV entry")
                 continue
 
-            strength_label, score = strength_from_premium(alert["premium"])
-            targets = compute_targets(entry)
+            # إذا UW ما رجع confidence/grade/score نحسبها
+            confidence = uw["confidence"]
+            grade = uw["grade"]
+            score = uw["score"]
 
-            msg = f"""🔥 Quiet Alpha A+ Signal
+            if not confidence or not grade or not score:
+                confidence, grade, score = derive_confidence_and_score(
+                    uw["premium"], uw["vol_oi"], uw["sweep"], uw["rule"]
+                )
 
-📊 {latest_tv_signal['ticker']} {alert['type']}
-💰 Entry: {format_price(entry)}
+            # إذا UW ما رجع targets/stop نحسبها من Entry
+            tp1 = uw["tp1"]
+            tp2 = uw["tp2"]
+            tp3 = uw["tp3"]
+            stop = uw["stop"]
 
-🐋 UW Flow
-🎯 Strike: {alert['strike']}
-💰 Premium: {format_money(alert['premium'])}
-🧾 Contract: {contract}
+            if not tp1 or not tp2 or not tp3 or not stop:
+                targets = compute_targets(entry)
+                tp1 = tp1 or targets["tp1"]
+                tp2 = tp2 or targets["tp2"]
+                tp3 = tp3 or targets["tp3"]
+                stop = stop or targets["sl"]
 
-🧠 Strength: {strength_label}
-📈 Score: {score}/100
+            reason = uw["reason"] or build_reason(uw)
 
-🎯 Targets
-TP1: {format_price(targets['tp1'])}
-TP2: {format_price(targets['tp2'])}
-TP3: {format_price(targets['tp3'])}
+            msg = f"""🔥 Quiet Alpha Signal
 
-🛑 Stop Loss
-SL: {format_price(targets['sl'])}
+{uw['symbol']} {uw['type']}
+Strike: {uw['strike']}
+Expiry: {uw['expiry']}
+Entry: {format_price(entry)}
 
-⚡ Source: TV + UW aligned"""
+Confidence: {confidence}
+Grade: {grade}
+Score: {score}/100
+
+💰 Premium: ${format_money(uw['premium'])}
+📦 Size: {format_money(uw['size'])}
+📊 Volume: {format_money(uw['volume'])}
+📌 OI: {format_money(uw['oi'])}
+📈 Vol/OI: {uw['vol_oi']}
+🧹 Sweep: {uw['sweep']}
+🧠 Rule: {uw['rule']}
+
+🎯 Targets:
+TP1: {format_price(tp1)}
+TP2: {format_price(tp2)}
+TP3: {format_price(tp3)}
+
+⚠️ Stop:
+{format_price(stop)}
+
+🪪 Contract:
+{uw['contract']}
+
+🧠 Reason:
+{reason}
+
+هذه ليست توصية شراء أو بيع."""
 
             send_telegram(msg)
             mark_sent(contract)
-
-            tracked_contracts[contract] = {
-                "entry": entry,
-                "side": alert["type"],
-                "ticker": latest_tv_signal["ticker"],
-                "strike": alert["strike"],
-                "premium": alert["premium"],
-                "last_price": parse_float_or_none(alert["live_price"]),
-                "milestones_sent": set(),
-                "strength": strength_label,
-                "created_at": now_utc(),
-            }
-
-            print("A+ sent:", contract)
+            print("Signal sent:", contract)
             break
 
     except Exception as e:
@@ -558,7 +649,7 @@ SL: {format_price(targets['sl'])}
 # MAIN
 # =========================
 if __name__ == "__main__":
-    send_telegram("✅ Quiet Alpha V6 bot started")
+    send_telegram("✅ Quiet Alpha Final bot started")
 
     while True:
         check_email()
