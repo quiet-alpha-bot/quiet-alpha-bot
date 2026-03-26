@@ -91,6 +91,69 @@ def normalize_side(value: str) -> str:
     return v
 
 
+def extract_strike_from_contract(contract: str):
+    if not contract:
+        return "N/A"
+
+    contract = contract.upper()
+
+    # مثال OCC: SPXW260326P06550000
+    m = re.search(r"[CP](\d{8})$", contract)
+    if m:
+        raw = m.group(1)
+        try:
+            strike_val = int(raw) / 1000
+            if strike_val.is_integer():
+                return str(int(strike_val))
+            return str(strike_val)
+        except Exception:
+            pass
+
+    # fallback
+    m2 = re.search(r"(\d{4,5})(?:\D*)$", contract)
+    if m2:
+        return m2.group(1)
+
+    return "N/A"
+
+
+def extract_type_from_contract(contract: str):
+    if not contract:
+        return "N/A"
+
+    contract = contract.upper()
+
+    m = re.search(r"([CP])\d{8}$", contract)
+    if m:
+        return "CALL" if m.group(1) == "C" else "PUT"
+
+    if "CALL" in contract:
+        return "CALL"
+    if "PUT" in contract:
+        return "PUT"
+
+    return "N/A"
+
+
+def extract_symbol_from_contract(contract: str):
+    if not contract:
+        return "N/A"
+
+    upper = contract.upper()
+
+    if upper.startswith("SPXW"):
+        return "SPXW"
+    if upper.startswith("SPX"):
+        return "SPX"
+    if upper.startswith("QQQ"):
+        return "QQQ"
+    if upper.startswith("NDX"):
+        return "NDX"
+
+    m = re.match(r"([A-Z]+)", upper)
+    return m.group(1) if m else "N/A"
+
+
 # =========================
 # TV EMAIL
 # =========================
@@ -175,65 +238,6 @@ def check_email():
 # =========================
 # UW API
 # =========================
-def extract_strike_from_contract(contract: str):
-    if not contract:
-        return "N/A"
-
-    # نمط OCC مثل SPXW260326P06550000
-    m = re.search(r"[CP](\d{8})$", contract)
-    if m:
-        raw = m.group(1)
-        try:
-            strike_val = int(raw) / 1000
-            if strike_val.is_integer():
-                return str(int(strike_val))
-            return str(strike_val)
-        except Exception:
-            pass
-
-    # fallback
-    m2 = re.search(r"(\d{4,5})(?:\D*)$", contract)
-    if m2:
-        return m2.group(1)
-
-    return "N/A"
-
-
-def extract_type_from_contract(contract: str):
-    if not contract:
-        return "N/A"
-
-    m = re.search(r"([CP])\d{8}$", contract)
-    if m:
-        return "CALL" if m.group(1) == "C" else "PUT"
-
-    if "CALL" in contract.upper():
-        return "CALL"
-    if "PUT" in contract.upper():
-        return "PUT"
-
-    return "N/A"
-
-
-def extract_symbol_from_contract(contract: str):
-    if not contract:
-        return "N/A"
-
-    upper = contract.upper()
-
-    if upper.startswith("SPXW"):
-        return "SPXW"
-    if upper.startswith("SPX"):
-        return "SPX"
-    if upper.startswith("QQQ"):
-        return "QQQ"
-    if upper.startswith("NDX"):
-        return "NDX"
-
-    m = re.match(r"([A-Z]+)", upper)
-    return m.group(1) if m else "N/A"
-
-
 def check_uw():
     try:
         url = "https://api.unusualwhales.com/api/alerts"
@@ -298,14 +302,12 @@ def check_uw():
                 or "N/A"
             )
 
-            option_type = (
-                normalize_side(
-                    alert.get("type")
-                    or alert.get("side")
-                    or option.get("type")
-                    or option.get("side")
-                    or extract_type_from_contract(contract)
-                )
+            option_type = normalize_side(
+                alert.get("type")
+                or alert.get("side")
+                or option.get("type")
+                or option.get("side")
+                or extract_type_from_contract(contract)
             )
 
             premium = (
@@ -314,6 +316,11 @@ def check_uw():
                 or alert.get("total_premium")
                 or alert.get("notional")
                 or alert.get("price")
+                or alert.get("size")
+                or alert.get("volume")
+                or alert.get("cost_basis")
+                or alert.get("transaction_value")
+                or alert.get("amount")
                 or "N/A"
             )
 
@@ -324,6 +331,8 @@ def check_uw():
 📌 Type: {option_type}
 💰 Premium: {premium}
 🧾 Contract: {contract or 'N/A'}
+
+⚡ Quiet Alpha Flow Insight
 """
 
             send_telegram(msg)
