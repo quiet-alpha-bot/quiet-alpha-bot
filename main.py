@@ -80,6 +80,17 @@ def strip_html(html: str) -> str:
     return text
 
 
+def normalize_side(value: str) -> str:
+    if not value:
+        return "N/A"
+    v = str(value).upper()
+    if "CALL" in v or v == "C":
+        return "CALL"
+    if "PUT" in v or v == "P":
+        return "PUT"
+    return v
+
+
 # =========================
 # TV EMAIL
 # =========================
@@ -178,28 +189,22 @@ def check_uw():
         print("UW RAW TEXT:", r.text[:500])
 
         if r.status_code != 200:
-            print("UW non-200 response")
             return
 
         data = r.json()
-
-        if isinstance(data, dict) and "data" in data:
-            alerts = data["data"]
-        else:
-            alerts = data
+        alerts = data.get("data", data) if isinstance(data, dict) else data
 
         if not alerts:
             print("No UW alerts")
             return
 
-        for alert in alerts[:5]:
-            # مفتاح فريد لمنع التكرار
+        for alert in alerts[:10]:
             alert_id = str(
                 alert.get("id")
                 or alert.get("_id")
                 or alert.get("uuid")
                 or alert.get("option_id")
-                or f"{alert.get('premium')}_{alert.get('created_at')}"
+                or f"{alert.get('premium')}_{alert.get('created_at')}_{alert.get('symbol')}"
             )
 
             if alert_id in seen_uw_ids:
@@ -207,10 +212,45 @@ def check_uw():
 
             option = alert.get("option", {}) or {}
 
-            symbol = option.get("symbol", "N/A")
-            strike = option.get("strike", "N/A")
-            option_type = option.get("type", "N/A")
-            premium = alert.get("premium", "N/A")
+            # قراءة مرنة للحقل
+            symbol = (
+                alert.get("symbol")
+                or alert.get("ticker")
+                or alert.get("underlying")
+                or option.get("symbol")
+                or option.get("ticker")
+                or "N/A"
+            )
+
+            strike = (
+                alert.get("strike")
+                or option.get("strike")
+                or option.get("strike_price")
+                or "N/A"
+            )
+
+            option_type = normalize_side(
+                alert.get("type")
+                or alert.get("side")
+                or option.get("type")
+                or option.get("side")
+                or ""
+            )
+
+            premium = (
+                alert.get("premium")
+                or alert.get("value")
+                or alert.get("total_premium")
+                or alert.get("notional")
+                or "N/A"
+            )
+
+            contract = (
+                alert.get("contract")
+                or option.get("contract")
+                or option.get("symbol")
+                or symbol
+            )
 
             msg = f"""🐋 UW FLOW
 
@@ -218,6 +258,7 @@ def check_uw():
 🎯 Strike: {strike}
 📌 Type: {option_type}
 💰 Premium: {premium}
+🧾 Contract: {contract}
 """
 
             send_telegram(msg)
