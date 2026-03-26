@@ -25,14 +25,15 @@ POLL_SECONDS = int(os.getenv("POLL_SECONDS", "20"))
 # =========================
 ONLY_SPX = True
 DEDUP_MINUTES = 10
-MIN_PREMIUM_SIGNAL = 100000
-MIN_PREMIUM_WATCH = 25000
+TV_SIGNAL_MAX_AGE_MINUTES = 15
+MIN_PREMIUM_FOR_A_PLUS = 25000  # إذا premium غير واضح أو أقل من هذا، نتجاهل
 
 # =========================
 # MEMORY
 # =========================
 seen_tv_subjects = set()
-recent_uw_contracts = {}  # contract -> last sent datetime
+recent_sent_contracts = {}   # contract -> datetime
+latest_tv_signal = None      # {"side": ..., "ticker": ..., "price": ..., "time": ..., "subject": ...}
 
 
 # =========================
@@ -59,23 +60,23 @@ def now_utc():
     return datetime.utcnow()
 
 
-def cleanup_recent_uw():
+def cleanup_recent_sent():
     cutoff = now_utc() - timedelta(minutes=DEDUP_MINUTES)
-    expired = [k for k, v in recent_uw_contracts.items() if v < cutoff]
+    expired = [k for k, v in recent_sent_contracts.items() if v < cutoff]
     for k in expired:
-        del recent_uw_contracts[k]
+        del recent_sent_contracts[k]
 
 
 def was_recently_sent(contract: str) -> bool:
-    cleanup_recent_uw()
+    cleanup_recent_sent()
     if not contract:
         return False
-    return contract in recent_uw_contracts
+    return contract in recent_sent_contracts
 
 
 def mark_sent(contract: str):
     if contract:
-        recent_uw_contracts[contract] = now_utc()
+        recent_sent_contracts[contract] = now_utc()
 
 
 def decode_mime(value):
@@ -137,13 +138,22 @@ def format_money(value):
         return str(value)
 
 
+def format_price(value):
+    if value in (None, "", "N/A"):
+        return "N/A"
+    try:
+        return f"{float(value):.2f}"
+    except Exception:
+        return str(value)
+
+
 def extract_strike_from_contract(contract: str):
     if not contract:
         return "N/A"
 
     contract = contract.upper()
 
-    # مثال: SPXW260326P06550000
+    # مثال OCC: SPXW260326P06550000
     m = re.search(r"[CP](\d{8})$", contract)
     if m:
         raw = m.group(1)
@@ -155,7 +165,6 @@ def extract_strike_from_contract(contract: str):
         except Exception:
             pass
 
-    # fallback
     m2 = re.search(r"(\d{4,5})(?:\D*)$", contract)
     if m2:
         return m2.group(1)
@@ -205,25 +214,33 @@ def is_spx_symbol(symbol: str, contract: str) -> bool:
     return "SPX" in combined
 
 
-def classify_uw(symbol: str, premium):
-    if ONLY_SPX and "SPX" not in str(symbol).upper():
-        return "SKIP"
-
+def compute_targets(entry):
     try:
-        p = float(premium)
+        e = float(entry)
+        return {
+            "tp1": round(e * 1.30, 2),
+            "tp2": round(e * 1.50, 2),
+            "tp3": round(e * 2.00, 2),
+            "sl": round(e * 0.70, 2),
+        }
     except Exception:
-        p = None
+        return {"tp1": "N/A", "tp2": "N/A", "tp3": "N/A", "sl": "N/A"}
 
-    if p is None:
-        return "WATCH"
 
-    if p >= MIN_PREMIUM_SIGNAL:
-        return "SIGNAL"
+def tv_signal_is_fresh(tv_signal: dict) -> bool:
+    if not tv_signal:
+        return False
+    age = now_utc() - tv_signal["time"]
+    return age <= timedelta(minutes=TV_SIGNAL_MAX_AGE_MINUTES)
 
-    if p >= MIN_PREMIUM_WATCH:
-        return "WATCH"
 
-    return "SKIP"
+def parse_float_or_none(value):
+    try:
+        if value in (None, "", "N/A"):
+            return None
+        return float(value)
+    except Exception:
+        return None
 
 
 # =========================
@@ -247,6 +264,8 @@ def parse_tv_email(subject: str, body: str):
 
 
 def check_email():
+    global latest_tv_signal
+
     try:
         mail = imaplib.IMAP4_SSL(IMAP_SERVER)
         mail.login(EMAIL_USER, EMAIL_PASS)
@@ -289,16 +308,17 @@ def check_email():
 
             side, ticker, price = parsed
 
-            text = f"""🔥 Quiet Alpha Signal
+            latest_tv_signal = {
+                "side": side,
+                "ticker": ticker,
+                "price": price,
+                "time": now_utc(),
+                "subject": subject
+            }
 
-📊 {ticker} {side}
-💰 Entry: {price}
-
-✉️ Source: TradingView Email"""
-
-            send_telegram(text)
+            # V4: ما نرسل TV وحده
             seen_tv_subjects.add(subject)
-            print("TV sent:", subject)
+            print("TV cached only:", subject)
             break
 
         mail.logout()
@@ -411,28 +431,48 @@ def check_uw():
             if not premium:
                 premium = "N/A"
 
-            grade = classify_uw(symbol, premium)
-
-            if grade == "SKIP":
-                print("UW skipped low quality:", contract, premium)
+            # V4: فقط إذا TV موجود وفريش ومتوافق
+            if not latest_tv_signal or not tv_signal_is_fresh(latest_tv_signal):
+                print("UW skipped: no fresh TV signal")
                 continue
 
-            emoji = "🔥" if grade == "SIGNAL" else "🟡"
-            label = "Quiet Alpha Signal" if grade == "SIGNAL" else "Quiet Alpha Watch"
+            if latest_tv_signal["side"] != option_type:
+                print("UW skipped: side mismatch", latest_tv_signal["side"], option_type)
+                continue
 
-            msg = f"""{emoji} {label}
+            premium_num = parse_float_or_none(premium)
+            if premium_num is None or premium_num < MIN_PREMIUM_FOR_A_PLUS:
+                print("UW skipped: premium too low/unknown", premium)
+                continue
 
-📊 {symbol}
+            tv_entry = latest_tv_signal["price"]
+            tv_ticker = latest_tv_signal["ticker"]
+
+            targets = compute_targets(tv_entry)
+
+            msg = f"""🔥 Quiet Alpha A+ Signal
+
+📊 {tv_ticker} {option_type}
+💰 Entry: {format_price(tv_entry)}
+
+🐋 UW Flow
 🎯 Strike: {strike}
-📌 Type: {option_type}
 💰 Premium: {format_money(premium)}
 🧾 Contract: {contract or 'N/A'}
 
-⚡ Quiet Alpha Flow Insight"""
+🎯 Targets
+TP1: {format_price(targets['tp1'])}
+TP2: {format_price(targets['tp2'])}
+TP3: {format_price(targets['tp3'])}
+
+🛑 Stop Loss
+SL: {format_price(targets['sl'])}
+
+⚡ Source: TV + UW aligned"""
 
             send_telegram(msg)
             mark_sent(contract)
-            print("UW sent:", contract, premium, grade)
+            print("A+ sent:", contract, premium)
             break
 
     except Exception as e:
@@ -443,7 +483,7 @@ def check_uw():
 # MAIN
 # =========================
 if __name__ == "__main__":
-    send_telegram("✅ Quiet Alpha V2 bot started")
+    send_telegram("✅ Quiet Alpha V4 bot started")
 
     while True:
         check_email()
