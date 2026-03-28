@@ -1,220 +1,457 @@
 import os
 import time
+from threading import Thread
+from datetime import datetime, timedelta
+from typing import Any, Dict, Optional
+
 import requests
 from flask import Flask, request, jsonify
-from threading import Thread
-from datetime import datetime
 
 app = Flask(__name__)
 
-# --- الإعدادات والمتغيرات ---
-TELEGRAM_TOKEN = os.environ.get("BOT_TOKEN")
-CHAT_ID = os.environ.get("SIGNAL_CHAT_ID")
-UW_API_KEY = os.environ.get("UW_API_KEY")
-POLL_SECONDS = int(os.environ.get("POLL_SECONDS", "20"))
-TARGET_TICKERS = ["SPX"]
+# =========================
+# ENV
+# =========================
+TELEGRAM_TOKEN = os.getenv("BOT_TOKEN")
+CHAT_ID = os.getenv("SIGNAL_CHAT_ID")
+UW_API_KEY = os.getenv("UW_API_KEY")
+POLL_SECONDS = int(os.getenv("POLL_SECONDS", "20"))
+PORT = int(os.getenv("PORT", "5000"))
 
-# سجل لمنع التكرار
-seen_trade_ids = set()
+# =========================
+# SETTINGS
+# =========================
+MATCH_WINDOW_MINUTES = 10
+MIN_PREMIUM = 100000
+MIN_PRICE = 2.0
+MAX_PRICE = 15.0
 
-# حالة السوق (يتم تحديثها عبر TradingView)
+TARGETS = [
+    {"pct": 1.30, "label": "30%", "new_sl_pct": 1.00, "emoji": "✅"},
+    {"pct": 1.50, "label": "50%", "new_sl_pct": 1.20, "emoji": "🔥"},
+    {"pct": 1.70, "label": "70%", "new_sl_pct": 1.40, "emoji": "✨"},
+    {"pct": 2.00, "label": "100%", "new_sl_pct": 1.60, "emoji": "🎉"},
+]
+
+# =========================
+# MEMORY
+# =========================
 market_status = {"vix": "Neutral", "trend": "Neutral"}
 
+tv_cache: Dict[str, Dict[str, Optional[datetime]]] = {
+    "CALL": {"time": None},
+    "PUT": {"time": None},
+}
 
-# --- 1. استقبال التنبيهات من TradingView (Webhook) ---
+uw_cache: Dict[str, Dict[str, Any]] = {
+    "CALL": {"time": None, "trade": None},
+    "PUT": {"time": None, "trade": None},
+}
+
+active_trades: Dict[str, Dict[str, Any]] = {}
+sent_trade_ids = set()
+
+# =========================
+# HELPERS
+# =========================
+def now() -> datetime:
+    return datetime.now()
+
+
+def normalize_option_type(value: Any) -> str:
+    v = str(value or "").upper().strip()
+    if v in ("CALL", "C"):
+        return "CALL"
+    if v in ("PUT", "P"):
+        return "PUT"
+    return "N/A"
+
+
+def safe_float(value: Any, default: float = 0.0) -> float:
+    try:
+        if value in (None, "", "N/A"):
+            return default
+        return float(value)
+    except Exception:
+        return default
+
+
+def fmt_price(value: Any) -> str:
+    try:
+        return f"{float(value):.2f}"
+    except Exception:
+        return "N/A"
+
+
+def fmt_money(value: Any) -> str:
+    try:
+        return f"{float(value):,.0f}"
+    except Exception:
+        return "N/A"
+
+
+def get_duration(start_time: datetime) -> str:
+    delta = now() - start_time
+    total_seconds = int(delta.total_seconds())
+    minutes = total_seconds // 60
+    seconds = total_seconds % 60
+    if minutes == 0:
+        return f"{seconds} sec"
+    return f"{minutes} min {seconds} sec"
+
+
+def build_trade_id(trade: Dict[str, Any]) -> str:
+    return str(
+        trade.get("option_symbol")
+        or trade.get("contract")
+        or trade.get("id")
+        or trade.get("_id")
+        or trade.get("uuid")
+        or f"{trade.get('strike')}_{trade.get('option_type')}_{trade.get('price')}"
+    )
+
+
+def send_msg(text: str) -> None:
+    if not TELEGRAM_TOKEN or not CHAT_ID:
+        print("❌ Telegram config missing.")
+        return
+
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    payload = {
+        "chat_id": CHAT_ID,
+        "text": text,
+        "parse_mode": "Markdown",
+    }
+
+    try:
+        r = requests.post(url, json=payload, timeout=15)
+        print("Telegram:", r.status_code, r.text[:200])
+    except Exception as e:
+        print("Telegram Error:", repr(e))
+
+
+def cleanup_caches():
+    cutoff = now() - timedelta(minutes=MATCH_WINDOW_MINUTES)
+
+    for side in ("CALL", "PUT"):
+        if tv_cache[side]["time"] and tv_cache[side]["time"] < cutoff:
+            tv_cache[side]["time"] = None
+
+        if uw_cache[side]["time"] and uw_cache[side]["time"] < cutoff:
+            uw_cache[side]["time"] = None
+            uw_cache[side]["trade"] = None
+
+
+# =========================
+# WEBHOOK FROM TRADINGVIEW
+# =========================
 @app.route("/webhook", methods=["POST"])
 def webhook():
     data = request.get_json(silent=True) or {}
 
     if "vix" in data:
         market_status["vix"] = str(data["vix"])
+
     if "trend" in data:
         market_status["trend"] = str(data["trend"])
 
-    print(f"[{datetime.now().strftime('%H:%M:%S')}] Webhook Update: {market_status}")
-    return jsonify({"status": "ok", "market_status": market_status}), 200
+    direction = normalize_option_type(data.get("direction") or data.get("signal"))
+
+    print(f"[{now().strftime('%H:%M:%S')}] Webhook Update: {data}")
+    print("Market Status:", market_status)
+
+    if direction in ("CALL", "PUT"):
+        handle_tv_alert(direction)
+
+    return jsonify({"status": "ok"}), 200
 
 
-# --- 2. دوال المساعدة والإرسال ---
-def send_msg(text: str):
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    tv_url = "https://www.tradingview.com/chart/?symbol=CBOE%3ASPX"
+# =========================
+# MATCHING ENGINE
+# =========================
+def handle_tv_alert(direction: str):
+    cleanup_caches()
 
-    keyboard = {
-        "inline_keyboard": [
-            [{"text": "📊 فتح شارت SPX", "url": tv_url}]
-        ]
+    current_time = now()
+    tv_cache[direction]["time"] = current_time
+
+    send_msg(
+        f"📡 *Quiet Alpha TV Alert*\n\n"
+        f"Direction: *{direction}*\n"
+        f"Trend: `{market_status['trend']}`\n"
+        f"VIX: `{market_status['vix']}`\n\n"
+        f"UW confirmation pending..."
+    )
+
+    cached = uw_cache[direction]
+    if cached["time"] and cached["trade"] and (current_time - cached["time"]) <= timedelta(minutes=MATCH_WINDOW_MINUTES):
+        print(f"✅ Match: TV confirmed previous whale trade ({direction})")
+        execute_signal(cached["trade"], "Match Confirmed (Chart + Whale)")
+
+
+def process_whale_trade(trade: Dict[str, Any]):
+    cleanup_caches()
+
+    current_time = now()
+    price = safe_float(trade.get("price") or trade.get("mark") or trade.get("last"))
+    premium = safe_float(
+        trade.get("premium")
+        or trade.get("value")
+        or trade.get("total_premium")
+        or trade.get("notional")
+        or trade.get("transaction_value")
+    )
+
+    opt_type = normalize_option_type(
+        trade.get("option_type")
+        or trade.get("operation_type")
+        or trade.get("type")
+        or trade.get("side")
+    )
+
+    if opt_type == "N/A":
+        return
+
+    if premium < MIN_PREMIUM:
+        return
+
+    if not (MIN_PRICE <= price <= MAX_PRICE):
+        return
+
+    uw_cache[opt_type] = {"time": current_time, "trade": trade}
+
+    tv_time = tv_cache[opt_type]["time"]
+    if tv_time and (current_time - tv_time) <= timedelta(minutes=MATCH_WINDOW_MINUTES):
+        print(f"✅ Match: Whale trade confirmed TV alert ({opt_type})")
+        execute_signal(trade, "Match Confirmed (Chart + Whale)")
+
+
+# =========================
+# SIGNAL EXECUTION
+# =========================
+def execute_signal(trade: Dict[str, Any], reason: str):
+    option_symbol = str(trade.get("option_symbol") or trade.get("contract") or "N/A")
+    trade_id = build_trade_id(trade)
+
+    if trade_id in sent_trade_ids or trade_id in active_trades:
+        return
+
+    price = safe_float(trade.get("price") or trade.get("mark") or trade.get("last"))
+    strike = trade.get("strike") or "N/A"
+    opt_type = normalize_option_type(
+        trade.get("option_type")
+        or trade.get("operation_type")
+        or trade.get("type")
+        or trade.get("side")
+    )
+    premium = safe_float(
+        trade.get("premium")
+        or trade.get("value")
+        or trade.get("total_premium")
+        or trade.get("notional")
+        or trade.get("transaction_value")
+    )
+
+    if price <= 0 or opt_type == "N/A":
+        return
+
+    start_dt = now()
+    active_trades[trade_id] = {
+        "trade_id": trade_id,
+        "option_symbol": option_symbol,
+        "strike": strike,
+        "side": opt_type,
+        "entry": price,
+        "premium": premium,
+        "start": start_dt,
+        "last_tp": -1,
+        "closed": False,
+        "highest": price,
+        "stop": round(price * 0.70, 2),
     }
 
-    payload = {
-        "chat_id": CHAT_ID,
-        "text": text,
-        "parse_mode": "Markdown",
-        "reply_markup": keyboard
-    }
-
-    try:
-        r = requests.post(url, json=payload, timeout=10)
-        print("Telegram status:", r.status_code, r.text[:200])
-    except Exception as e:
-        print(f"Telegram Error: {e}")
-
-
-def send_welcome_message():
-    now = datetime.now().strftime('%H:%M:%S')
     msg = (
-        f"🚀 *تم تشغيل رادار SPX بنجاح!*\n"
+        f"🔥 *Quiet Alpha Signal (MATCHED)*\n\n"
+        f"🎯 *{option_symbol}*\n"
+        f"🧱 *Strike:* `{strike}`\n"
+        f"🔥 *Type:* `{opt_type}`\n"
+        f"💵 *Entry:* `${price:.2f}`\n"
+        f"💰 *Premium:* `${premium:,.0f}`\n"
         f"━━━━━━━━━━━━━━\n"
-        f"⏰ الوقت: `{now}`\n"
-        f"📊 النطاق السعري الحالي: `$2.0 - $15.0`\n"
-        f"🎯 حالة السوق الحالية: `{market_status['trend']} | VIX: {market_status['vix']}`\n"
+        f"📊 *Grade:* A+\n"
+        f"🧠 *Status:* {reason}\n"
+        f"📈 *Market:* `{market_status['trend']} | VIX: {market_status['vix']}`\n"
         f"━━━━━━━━━━━━━━\n"
-        f"💡 *أنا الآن أراقب تدفقات Unusual Whales بالنيابة عنكِ...*"
+        f"🎯 *Targets:* +30%, +50%, +70%, +100%\n"
+        f"🛡️ *Initial Stop:* `${price * 0.70:.2f}`\n"
+        f"━━━━━━━━━━━━━━\n"
+        f"⏱️ *Match Time:* `{start_dt.strftime('%H:%M:%S')}`"
     )
     send_msg(msg)
 
+    sent_trade_ids.add(trade_id)
 
-# --- 3. محرك تحليل السيولة ---
-def score_trade(premium, opt_type, trend, vix):
-    score = 6
-    if premium > 500000:
-        score += 1
-    if trend == "Up" and opt_type == "CALL":
-        score += 2
-    if trend == "Down" and opt_type == "PUT":
-        score += 1
-    if vix == "High" and opt_type == "PUT":
-        score += 1
-    return score
+    # reset matched caches
+    tv_cache[opt_type]["time"] = None
+    uw_cache[opt_type]["time"] = None
+    uw_cache[opt_type]["trade"] = None
 
 
-def normalize_option_type(raw):
-    raw = str(raw or "").upper()
-    if raw in ("C", "CALL"):
-        return "CALL"
-    if raw in ("P", "PUT"):
-        return "PUT"
-    return ""
+# =========================
+# TARGET TRACKING
+# =========================
+def check_targets(trade_id: str, current_price: float):
+    trade = active_trades.get(trade_id)
+    if not trade or trade["closed"]:
+        return
+
+    entry = trade["entry"]
+
+    if current_price > trade["highest"]:
+        trade["highest"] = current_price
+
+    for i, target in enumerate(TARGETS):
+        if current_price >= entry * target["pct"] and i > trade["last_tp"]:
+            trade["last_tp"] = i
+            trade["stop"] = round(entry * target["new_sl_pct"], 2)
+            duration = get_duration(trade["start"])
+
+            update_msg = (
+                f"{target['emoji']} *Quiet Alpha Update*\n\n"
+                f"🎯 *{trade['option_symbol']}*\n"
+                f"📈 *Progress:* `{target['label']}`\n"
+                f"💵 *Entry:* `${entry:.2f}`\n"
+                f"💰 *Current:* `${current_price:.2f}`\n"
+                f"⏱️ *Time Elapsed:* `{duration}`\n"
+                f"━━━━━━━━━━━━━━\n"
+                f"🛡️ *Updated Stop:* `{target['new_sl_pct']*100 - 100:.0f}%` if applicable\n"
+                f"💡 *Stop Price:* `${trade['stop']:.2f}`\n"
+                f"━━━━━━━━━━━━━━\n"
+                f"🧠 *Note:* تم تأمين الربح بنجاح."
+            )
+            send_msg(update_msg)
+
+    # wave after 100%
+    if trade["last_tp"] >= 3 and current_price >= entry * 2.20 and not trade.get("wave_sent", False):
+        send_msg(
+            f"🌊 *Quiet Alpha Wave*\n\n"
+            f"🎯 *{trade['option_symbol']}*\n"
+            f"💵 Entry: `${entry:.2f}`\n"
+            f"🚀 Current: `${current_price:.2f}`\n"
+            f"📈 Trade extending beyond 100%\n\n"
+            f"لا دخول متأخر\n"
+            f"فقط إدارة ما تبقى من الصفقة"
+        )
+        trade["wave_sent"] = True
+
+    # stop hit
+    if current_price <= trade["stop"]:
+        pnl = ((current_price - entry) / entry) * 100
+        duration = get_duration(trade["start"])
+
+        send_msg(
+            f"🛡️ *Quiet Alpha Exit*\n\n"
+            f"🎯 *{trade['option_symbol']}*\n"
+            f"💵 Entry: `${entry:.2f}`\n"
+            f"📉 Exit: `${current_price:.2f}`\n"
+            f"✅ *P/L:* `{pnl:.1f}%`\n"
+            f"⏱️ *Duration:* `{duration}`"
+        )
+        trade["closed"] = True
 
 
+# =========================
+# UW FETCH
+# =========================
+def fetch_uw_alerts():
+    if not UW_API_KEY:
+        print("❌ UW_API_KEY missing.")
+        return []
+
+    headers = {
+        "Authorization": f"Bearer {UW_API_KEY}",
+        "Accept": "application/json",
+    }
+
+    try:
+        res = requests.get(
+            "https://api.unusualwhales.com/api/alerts",
+            headers=headers,
+            timeout=15,
+        )
+
+        print("UW Status:", res.status_code)
+        if res.status_code != 200:
+            print("UW Response:", res.text[:300])
+            return []
+
+        data = res.json()
+        if isinstance(data, dict):
+            trades = data.get("data", []) or data.get("results", []) or []
+        elif isinstance(data, list):
+            trades = data
+        else:
+            trades = []
+
+        print("Fetched trades:", len(trades))
+        return trades
+
+    except Exception as e:
+        print("UW Fetch Error:", repr(e))
+        return []
+
+
+# =========================
+# MONITOR LOOP
+# =========================
 def monitor_flow():
-    print(f"🚀 البوت بدأ مراقبة تدفقات {TARGET_TICKERS}...")
+    print("🚀 Quiet Alpha matching engine started...")
 
     while True:
-        headers = {"Authorization": f"Bearer {UW_API_KEY}"}
+        trades = fetch_uw_alerts()
 
-        try:
-            res = requests.get(
-                "https://api.unusualwhales.com/api/alerts",
-                headers=headers,
-                timeout=15
-            )
+        # first: process new whale trades
+        for trade in trades[:50]:
+            try:
+                process_whale_trade(trade)
+            except Exception as e:
+                print("process_whale_trade error:", repr(e))
 
-            if res.status_code != 200:
-                print("UW status:", res.status_code, res.text[:200])
-                time.sleep(POLL_SECONDS)
-                continue
-
-            data = res.json()
-            trades = data.get("data", []) if isinstance(data, dict) else []
-
-            print("Fetched trades:", len(trades))
-
-            for t in trades:
-                ticker = str(
-                    t.get("ticker")
-                    or t.get("symbol")
-                    or t.get("underlying")
-                    or ""
-                ).upper()
-
-                if ticker not in TARGET_TICKERS and "SPX" not in ticker:
+        # second: update active trades by matching option symbol / contract
+        for trade in trades[:50]:
+            try:
+                option_symbol = str(trade.get("option_symbol") or trade.get("contract") or "")
+                if not option_symbol:
                     continue
 
-                trade_id = str(
-                    t.get("id")
-                    or t.get("_id")
-                    or t.get("uuid")
-                    or t.get("option_symbol")
-                    or t.get("contract")
-                    or f"{ticker}_{t.get('strike')}_{t.get('price')}_{t.get('timestamp')}"
-                )
-
-                if trade_id in seen_trade_ids:
+                current_price = safe_float(trade.get("price") or trade.get("mark") or trade.get("last"))
+                if current_price <= 0:
                     continue
 
-                price = float(
-                    t.get("price")
-                    or t.get("mark")
-                    or t.get("last")
-                    or 0
-                )
+                # find active trade by exact option symbol
+                for trade_id, active in list(active_trades.items()):
+                    if active["closed"]:
+                        continue
+                    if active["option_symbol"] == option_symbol:
+                        check_targets(trade_id, current_price)
 
-                if not (2.0 <= price <= 15.0):
-                    continue
-
-                opt = normalize_option_type(
-                    t.get("option_type")
-                    or t.get("operation_type")
-                    or t.get("type")
-                    or t.get("side")
-                )
-                if opt not in ("CALL", "PUT"):
-                    continue
-
-                prem = float(
-                    t.get("premium")
-                    or t.get("value")
-                    or t.get("total_premium")
-                    or t.get("notional")
-                    or 0
-                )
-
-                strike = t.get("strike") or "N/A"
-                option_symbol = t.get("option_symbol") or t.get("contract") or f"SPX {strike} {opt}"
-
-                score = score_trade(prem, opt, market_status["trend"], market_status["vix"])
-
-                if score >= 7:
-                    tp_50 = price * 1.5
-                    tp_100 = price * 2.0
-
-                    msg = (
-                        f"🚨 *إشارة SPX قوية ({score}/10)* 🚨\n"
-                        f"━━━━━━━━━━━━━━\n"
-                        f"🎯 العقد: `{option_symbol}`\n"
-                        f"🧱 السترايك: `{strike}`\n"
-                        f"🔥 النوع: `{opt}`\n"
-                        f"💵 سعر الحوت: `${price:.2f}`\n"
-                        f"💰 السيولة: `${prem:,.0f}`\n"
-                        f"📈 حالة السوق: `{market_status['trend']} | VIX: {market_status['vix']}`\n"
-                        f"━━━━━━━━━━━━━━\n"
-                        f"🚀 *أهداف الدبل المتوقعة:*\n"
-                        f"✅ +50%: `${tp_50:.2f}`\n"
-                        f"💎 +100%: `${tp_100:.2f}`\n"
-                        f"━━━━━━━━━━━━━━\n"
-                        f"💡 *ملاحظة:* راقبي الاتجاه في TradingView قبل الدخول!"
-                    )
-
-                    send_msg(msg)
-                    seen_trade_ids.add(trade_id)
-                    print(f"✅ تم إرسال تنبيه {ticker} {strike} {opt}")
-
-        except Exception as e:
-            print(f"Monitor Flow Error: {e}")
+            except Exception as e:
+                print("track active trade error:", repr(e))
 
         time.sleep(POLL_SECONDS)
 
 
-# --- MAIN ---
+# =========================
+# MAIN
+# =========================
 def main():
     if not TELEGRAM_TOKEN or not CHAT_ID or not UW_API_KEY:
-        print("❌ متغيرات أساسية ناقصة: BOT_TOKEN / SIGNAL_CHAT_ID / UW_API_KEY")
+        print("❌ Missing env vars: BOT_TOKEN / SIGNAL_CHAT_ID / UW_API_KEY")
         return
 
-    send_welcome_message()
+    send_msg("🚀 *Quiet Alpha Matching Engine Started*")
     Thread(target=monitor_flow, daemon=True).start()
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", "5000")))
+    app.run(host="0.0.0.0", port=PORT)
 
 
 if __name__ == "__main__":
