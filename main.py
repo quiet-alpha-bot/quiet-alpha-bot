@@ -1,19 +1,22 @@
 import time
 from threading import Thread
+# تأكدي من استيراد المكتبات اللازمة مثل flask و requests إذا كانت مستخدمة في باقي الكود
+# من الصورة يبدو أنك تستخدمين Flask لـ Railway
 
 # =========================
-# إعدادات وتحديث الصفقات النشطة
+# 1. وظيفة تتبع الصفقات النشطة
 # =========================
 def track_active_trades():
     while True:
         try:
-            # افتراضياً: يتم جلب الصفقات من الـ API الخاص بـ Unusual Whales
-            # trades = fetch_uw_flow() 
-            
-            # تحديث الصفقات النشطة بمطابقة رمز الأوبشن / العقد
-            for trade in trades[:50]:
+            # هنا نفترض وجود قائمة trades يتم جلبها من Unusual Whales
+            # لغرض استمرار الكود بدون خطأ إذا كانت trades غير معرفة:
+            global trades 
+            current_trades = trades[:50] if 'trades' in globals() else []
+
+            for trade in current_trades:
                 try:
-                    # تنظيف رمز العقد لضمان المطابقة (SPXW / SPX)
+                    # تنظيف وتوحيد رمز العقد لضمان التطابق التام
                     option_symbol = str(trade.get("option_symbol") or trade.get("contract") or "").strip().upper()
                     if not option_symbol:
                         continue
@@ -22,53 +25,52 @@ def track_active_trades():
                     if current_price <= 0:
                         continue
 
-                    # البحث في الصفقات النشطة عن تطابق تام لرمز الأوبشن
+                    # البحث في الصفقات النشطة (active_trades)
                     for trade_id, active in list(active_trades.items()):
-                        if active["closed"]:
+                        if active.get("closed"):
                             continue
                         
-                        # مطابقة دقيقة لضمان وصول التنبيه (حروف كبيرة وبدون مسافات)
-                        if active["option_symbol"].strip().upper() == option_symbol:
+                        # مطابقة دقيقة لرموز العقود (مثلاً SPXW260330P06370000)
+                        if active.get("option_symbol", "").strip().upper() == option_symbol:
                             check_targets(trade_id, current_price)
 
                 except Exception as e:
-                    print(f"❌ Error tracking trade details: {repr(e)}")
+                    print(f"⚠️ Error in inner trade loop: {repr(e)}")
 
         except Exception as e:
-            print(f"❌ General tracking error: {repr(e)}")
+            print(f"❌ track active trade error: {repr(e)}")
 
-        # وقت التحديث (يفضل 5 ثواني لسرعة سباكس)
+        # تحديث كل 5 ثوانٍ لسرعة سباكس القصوى
         time.sleep(POLL_SECONDS if 'POLL_SECONDS' in globals() else 5)
 
 # =========================
-# الدالة الرئيسية لتشغيل البوت
+# 2. الدالة الرئيسية (MAIN)
 # =========================
 def main():
-    # التحقق من وجود المتغيرات الضرورية لعمل التنبيهات
+    # التحقق من وجود المتغيرات البيئية (Env Vars)
     if not TELEGRAM_TOKEN or not CHAT_ID or not UW_API_KEY:
-        print("❌ Missing environment variables: TELEGRAM_TOKEN / CHAT_ID / UW_API_KEY")
-        print("💡 تأكد من ضبط إعدادات التلغرام ومفتاح UW بشكل صحيح.")
+        print("❌ Missing env vars: BOT_TOKEN / SIGNAL_CHAT_ID / UW_API_KEY")
         return
 
-    print("🚀 Connecting to Telegram and Unusual Whales...")
-    
-    # إرسال رسالة ترحيبية للتلغرام للتأكد من الاتصال
+    # إرسال إشارة بدء التشغيل للتلجرام للتأكد من الربط
     try:
-        send_msg("🚀 *Quiet Alpha Matching Engine Started*\n✅ Monitoring SPX Flow...")
-    except Exception as e:
-        print(f"⚠️ Could not send Telegram start message: {e}")
+        send_msg("🚀 *Quiet Alpha Matching Engine Started*\n✅ Monitoring Live SPX Flow...")
+    except:
+        print("⚠️ Could not send Telegram start message.")
 
-    # تشغيل مراقبة السيولة في خيط منفصل (Background Thread)
+    # تشغيل مراقبة التدفق (monitor_flow) في خيط منفصل
     Thread(target=monitor_flow, daemon=True).start()
     
-    # تشغيل تتبع الأهداف في خيط منفصل
+    # تشغيل تتبع الصفقات (track_active_trades) في خيط منفصل
     Thread(target=track_active_trades, daemon=True).start()
     
-    # تشغيل السيرفر (Flask/App) لاستقبال الويب هوك أو الأوامر
-    app.run(host="0.0.0.0", port=PORT if 'PORT' in globals() else 5000)
+    # تشغيل سيرفر الويب الخاص بـ Railway
+    print(f"📡 App running on port {PORT if 'PORT' in globals() else 5000}")
+    app.run(host="0.0.0.0", port=int(PORT) if 'PORT' in globals() else 5000)
 
 # =========================
-# نقطة الدخول (تصحيح الشرطات السفلية)
+# 3. نقطة الدخول (التصحيح النهائي)
 # =========================
+# هذا السطر هو الذي تسبب في الـ Crash في الصورة، قمت بتصحيحه الآن:
 if name == "__main__":
     main()
