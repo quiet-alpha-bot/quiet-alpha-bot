@@ -22,7 +22,7 @@ PORT = int(os.getenv("PORT", "5000"))
 # SETTINGS
 # =========================
 MATCH_WINDOW_MINUTES = 10
-MIN_PREMIUM = 100000
+MIN_PREMIUM = 50000
 MIN_PRICE = 2.0
 MAX_PRICE = 15.0
 
