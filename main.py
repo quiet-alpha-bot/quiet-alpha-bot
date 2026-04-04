@@ -26,7 +26,7 @@ TELEGRAM_URL = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
 UW_FLOW_ALERTS_URL = "https://api.unusualwhales.com/api/option-trades/flow-alerts"
 
 POLL_SECONDS = 20
-MATCH_WINDOW_MINUTES = 10
+MATCH_WINDOW_MINUTES = 3
 DEBUG = True
 
 # Quiet Alpha filters
