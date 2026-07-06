@@ -8,6 +8,12 @@ app = Flask(__name__)
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = os.getenv("SIGNAL_CHAT_ID")
 
+if not BOT_TOKEN:
+    raise ValueError("BOT_TOKEN is missing")
+
+if not CHAT_ID:
+    raise ValueError("SIGNAL_CHAT_ID is missing")
+
 TELEGRAM_URL = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
 
 
@@ -24,19 +30,20 @@ def send_message(text):
 
 @app.route("/")
 def home():
-    return "Quiet Alpha Bot Running"
+    return "Quiet Alpha Bot Online"
 
 
 @app.route("/call", methods=["POST"])
-def call():
-    data = request.json
+def call_signal():
 
-    strike = data["strike"]
-    premium = data["premium"]
+    data = request.get_json()
+
+    strike = data.get("strike")
+    premium = data.get("premium")
 
     today = datetime.now().strftime("%d %b %Y")
 
-    msg = f"""
+    message = f"""
 🟢 <b>CALL SIGNAL</b>
 
 📍 Strike : {strike}C
@@ -44,21 +51,22 @@ def call():
 📅 Date : {today}
 """
 
-    send_message(msg)
+    send_message(message)
 
-    return {"status": "ok"}
+    return {"status": "success"}
 
 
 @app.route("/put", methods=["POST"])
-def put():
-    data = request.json
+def put_signal():
 
-    strike = data["strike"]
-    premium = data["premium"]
+    data = request.get_json()
+
+    strike = data.get("strike")
+    premium = data.get("premium")
 
     today = datetime.now().strftime("%d %b %Y")
 
-    msg = f"""
+    message = f"""
 🔴 <b>PUT SIGNAL</b>
 
 📍 Strike : {strike}P
@@ -66,10 +74,13 @@ def put():
 📅 Date : {today}
 """
 
-    send_message(msg)
+    send_message(message)
 
-    return {"status": "ok"}
+    return {"status": "success"}
 
 
 if name == "__main__":
-    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)))
+    app.run(
+        host="0.0.0.0",
+        port=int(os.getenv("PORT", 5000))
+    )
