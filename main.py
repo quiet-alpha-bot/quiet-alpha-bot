@@ -8,18 +8,18 @@ app = Flask(__name__)
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = os.getenv("SIGNAL_CHAT_ID")
 
-if not BOT_TOKEN:
-    raise ValueError("BOT_TOKEN is missing")
+if BOT_TOKEN is None:
+    raise Exception("BOT_TOKEN is missing")
 
-if not CHAT_ID:
-    raise ValueError("SIGNAL_CHAT_ID is missing")
+if CHAT_ID is None:
+    raise Exception("SIGNAL_CHAT_ID is missing")
 
-TELEGRAM_URL = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
 
 
 def send_message(text):
     requests.post(
-        TELEGRAM_URL,
+        TELEGRAM_API,
         json={
             "chat_id": CHAT_ID,
             "text": text,
@@ -34,53 +34,49 @@ def home():
 
 
 @app.route("/call", methods=["POST"])
-def call_signal():
+def call():
 
-    data = request.get_json()
+    data = request.get_json(force=True)
 
-    strike = data.get("strike")
-    premium = data.get("premium")
+    strike = data["strike"]
+    premium = data["premium"]
 
     today = datetime.now().strftime("%d %b %Y")
 
-    message = f"""
-🟢 <b>CALL SIGNAL</b>
+    send_message(
+        f"""🟢 <b>CALL SIGNAL</b>
 
-📍 Strike : {strike}C
-💰 Premium : ${premium}
-📅 Date : {today}
+Strike : {strike}C
+Premium : ${premium}
+Date : {today}
 """
+    )
 
-    send_message(message)
-
-    return {"status": "success"}
+    return {"status": "ok"}
 
 
 @app.route("/put", methods=["POST"])
-def put_signal():
+def put():
 
-    data = request.get_json()
+    data = request.get_json(force=True)
 
-    strike = data.get("strike")
-    premium = data.get("premium")
+    strike = data["strike"]
+    premium = data["premium"]
 
     today = datetime.now().strftime("%d %b %Y")
 
-    message = f"""
-🔴 <b>PUT SIGNAL</b>
+    send_message(
+        f"""🔴 <b>PUT SIGNAL</b>
 
-📍 Strike : {strike}P
-💰 Premium : ${premium}
-📅 Date : {today}
+Strike : {strike}P
+Premium : ${premium}
+Date : {today}
 """
+    )
 
-    send_message(message)
-
-    return {"status": "success"}
+    return {"status": "ok"}
 
 
 if name == "__main__":
-    app.run(
-        host="0.0.0.0",
-        port=int(os.getenv("PORT", 5000))
-    )
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
