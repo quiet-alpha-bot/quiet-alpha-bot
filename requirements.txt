@@ -1,3 +1,2 @@
-Flask
-requests
-gunicorn
+python-telegram-bot==22.2
+Pillow
