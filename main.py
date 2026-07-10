@@ -18,7 +18,7 @@ TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
 
 
 def send_message(text):
-    requests.post(
+    response = requests.post(
         TELEGRAM_API,
         json={
             "chat_id": CHAT_ID,
@@ -26,6 +26,9 @@ def send_message(text):
             "parse_mode": "HTML"
         }
     )
+
+    if response.status_code != 200:
+        raise Exception(response.text)
 
 
 @app.route("/")
@@ -43,14 +46,15 @@ def call():
 
     today = datetime.now().strftime("%d %b %Y")
 
-    send_message(
-        f"""🟢 <b>CALL SIGNAL</b>
+    message = f"""
+🟢 <b>CALL SIGNAL</b>
 
-Strike : {strike}C
-Premium : ${premium}
-Date : {today}
+📍 Strike : {strike}C
+💰 Premium : ${premium}
+📅 Date : {today}
 """
-    )
+
+    send_message(message)
 
     return {"status": "ok"}
 
@@ -65,17 +69,19 @@ def put():
 
     today = datetime.now().strftime("%d %b %Y")
 
-    send_message(
-        f"""🔴 <b>PUT SIGNAL</b>
+    message = f"""
+🔴 <b>PUT SIGNAL</b>
 
-Strike : {strike}P
-Premium : ${premium}
-Date : {today}
+📍 Strike : {strike}P
+💰 Premium : ${premium}
+📅 Date : {today}
 """
-    )
+
+    send_message(message)
 
     return {"status": "ok"}
 
 
-port = int(os.environ.get("PORT", 5000))
-app.run(host="0.0.0.0", port=port)
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
