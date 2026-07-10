@@ -84,7 +84,7 @@ def get_today() -> str:
 # =========================================================
 
 def load_font(size: int) -> ImageFont.ImageFont:
-    """تحميل خط متاح داخل Railway."""
+    """تحميل خط واضح ومتوافق مع Railway."""
 
     font_paths = [
         "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
@@ -96,10 +96,36 @@ def load_font(size: int) -> ImageFont.ImageFont:
 
     for font_path in font_paths:
         if os.path.exists(font_path):
-            return ImageFont.truetype(font_path, size=size)
+            return ImageFont.truetype(
+                font_path,
+                size=size,
+            )
 
     logger.warning("No TrueType font found. Using default font.")
     return ImageFont.load_default()
+
+
+# =========================================================
+# كتابة النص في منتصف الخانة
+# =========================================================
+
+def draw_centered_text(
+    draw: ImageDraw.ImageDraw,
+    position: tuple[int, int],
+    text: str,
+    font: ImageFont.ImageFont,
+) -> None:
+    """كتابة النص بوضوح وفي منتصف الموضع."""
+
+    draw.text(
+        position,
+        text,
+        font=font,
+        fill=(255, 255, 255),
+        anchor="mm",
+        stroke_width=2,
+        stroke_fill=(0, 0, 0),
+    )
 
 
 # =========================================================
@@ -111,7 +137,7 @@ def create_signal_card(
     strike: str,
     premium: str,
 ) -> BytesIO:
-    """تعبئة قالب CALL أو PUT وإرجاع الصورة."""
+    """كتابة الاسترايك والبريميوم والتاريخ داخل البطاقة."""
 
     if signal_type == "CALL":
         template_path = CALL_TEMPLATE
@@ -136,60 +162,60 @@ def create_signal_card(
 
     width, height = image.size
 
-    value_font = load_font(max(36, int(width * 0.035)))
-    date_font = load_font(max(30, int(width * 0.029)))
+    # حجم واضح ومناسب لدقة بطاقاتك
+    value_font = load_font(
+        max(76, int(width * 0.064))
+    )
 
-    text_color = (255, 255, 255)
-    stroke_color = (20, 20, 20)
+    date_font = load_font(
+        max(50, int(width * 0.043))
+    )
 
-    # مواضع النص داخل البطاقة
+    # =====================================================
+    # مواقع الكتابة داخل البطاقة
+    # =====================================================
+
+    # منتصف خانة ENTRY
     entry_position = (
         int(width * 0.325),
         int(height * 0.405),
     )
 
+    # منتصف خانة DATE
     date_position = (
-        int(width * 0.755),
+        int(width * 0.775),
         int(height * 0.405),
     )
 
+    # منتصف خانة PREMIUM
     premium_position = (
         int(width * 0.325),
         int(height * 0.510),
     )
 
-    draw.text(
-        entry_position,
-        contract,
+    draw_centered_text(
+        draw=draw,
+        position=entry_position,
+        text=contract,
         font=value_font,
-        fill=text_color,
-        anchor="ms",
-        stroke_width=1,
-        stroke_fill=stroke_color,
     )
 
-    draw.text(
-        premium_position,
-        f"${premium}",
+    draw_centered_text(
+        draw=draw,
+        position=premium_position,
+        text=f"${premium}",
         font=value_font,
-        fill=text_color,
-        anchor="ms",
-        stroke_width=1,
-        stroke_fill=stroke_color,
     )
 
-    draw.text(
-        date_position,
-        get_today(),
+    draw_centered_text(
+        draw=draw,
+        position=date_position,
+        text=get_today(),
         font=date_font,
-        fill=text_color,
-        anchor="ms",
-        stroke_width=1,
-        stroke_fill=stroke_color,
     )
 
     output = BytesIO()
-    output.name = f"quiet_alpha_{signal_type.lower()}.jpg"
+    output.name = f"quiet_alpha_{signal_type.lower()}_card.jpg"
 
     image.save(
         output,
@@ -214,7 +240,7 @@ async def publish_signal(
     strike: str,
     premium: str,
 ) -> None:
-    """إرسال الصورة فقط بدون نص أسفلها."""
+    """إرسال البطاقة كصورة فقط، بدون نص أسفلها."""
 
     card = create_signal_card(
         signal_type=signal_type,
@@ -227,8 +253,8 @@ async def publish_signal(
             chat_id=SIGNAL_CHAT_ID,
             photo=card,
             connect_timeout=30,
-            read_timeout=60,
-            write_timeout=60,
+            read_timeout=90,
+            write_timeout=90,
             pool_timeout=30,
         )
 
@@ -463,7 +489,9 @@ def main() -> None:
 
     application.add_error_handler(error_handler)
 
-    logger.info("Quiet Alpha Card Bot started successfully")
+    logger.info(
+        "Quiet Alpha Card Bot started successfully"
+    )
 
     application.run_polling(
         drop_pending_updates=True,
