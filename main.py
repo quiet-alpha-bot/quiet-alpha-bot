@@ -1,16 +1,14 @@
-import html
 import logging
 import os
 from datetime import datetime
+from io import BytesIO
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
+from PIL import Image, ImageDraw, ImageFont
 from telegram import Update
 from telegram.constants import ParseMode
-from telegram.ext import (
-    Application,
-    CommandHandler,
-    ContextTypes,
-)
+from telegram.ext import Application, CommandHandler, ContextTypes
 
 
 # =========================================================
@@ -21,7 +19,10 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 SIGNAL_CHAT_ID = os.getenv("SIGNAL_CHAT_ID")
 
 RIYADH_TIMEZONE = ZoneInfo("Asia/Riyadh")
+BASE_DIR = Path(__file__).resolve().parent
 
+CALL_TEMPLATE = BASE_DIR / "call_card.jpg"
+PUT_TEMPLATE = BASE_DIR / "put_card.jpg"
 
 if not BOT_TOKEN:
     raise ValueError("BOT_TOKEN is missing")
@@ -31,7 +32,7 @@ if not SIGNAL_CHAT_ID:
 
 
 # =========================================================
-# تسجيل الأحداث والأخطاء
+# السجلات
 # =========================================================
 
 logging.basicConfig(
@@ -43,12 +44,10 @@ logger = logging.getLogger("quiet-alpha-bot")
 
 
 # =========================================================
-# أدوات مساعدة
+# تنسيق البيانات
 # =========================================================
 
 def format_strike(value: str) -> str:
-    """التحقق من الاسترايك وترتيبه."""
-
     strike = float(value)
 
     if strike <= 0:
@@ -61,8 +60,6 @@ def format_strike(value: str) -> str:
 
 
 def format_premium(value: str) -> str:
-    """التحقق من سعر العقد وعرضه بمنزلتين عشريتين."""
-
     premium = float(value)
 
     if premium <= 0:
@@ -72,44 +69,151 @@ def format_premium(value: str) -> str:
 
 
 def get_today() -> str:
-    """تاريخ اليوم حسب توقيت السعودية."""
-
     now = datetime.now(RIYADH_TIMEZONE)
     return now.strftime("%d %b %Y")
 
 
-async def send_signal_to_channel(
+# =========================================================
+# الخطوط
+# =========================================================
+
+def load_font(size: int) -> ImageFont.FreeTypeFont:
+    font_paths = [
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+        "/usr/share/fonts/dejavu/DejaVuSans-Bold.ttf",
+        "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf",
+        "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
+    ]
+
+    for font_path in font_paths:
+        if os.path.exists(font_path):
+            return ImageFont.truetype(font_path, size=size)
+
+    return ImageFont.load_default()
+
+
+# =========================================================
+# إنشاء بطاقة Quiet Alpha
+# =========================================================
+
+def create_signal_card(
+    signal_type: str,
+    strike: str,
+    premium: str,
+) -> BytesIO:
+
+    if signal_type == "CALL":
+        template_path = CALL_TEMPLATE
+        contract = f"{strike}C"
+    else:
+        template_path = PUT_TEMPLATE
+        contract = f"{strike}P"
+
+    if not template_path.exists():
+        raise FileNotFoundError(
+            f"Template image was not found: {template_path.name}"
+        )
+
+    image = Image.open(template_path).convert("RGB")
+    draw = ImageDraw.Draw(image)
+
+    width, height = image.size
+
+    value_font = load_font(max(38, int(width * 0.037)))
+    date_font = load_font(max(32, int(width * 0.030)))
+
+    text_color = (245, 245, 245)
+    stroke_color = (10, 10, 10)
+
+    # الإحداثيات محسوبة بنسبة حجم الصورة حتى تعمل مع القالبين
+    entry_position = (
+        int(width * 0.325),
+        int(height * 0.418),
+    )
+
+    date_position = (
+        int(width * 0.790),
+        int(height * 0.418),
+    )
+
+    premium_position = (
+        int(width * 0.325),
+        int(height * 0.522),
+    )
+
+    draw.text(
+        entry_position,
+        contract,
+        font=value_font,
+        fill=text_color,
+        anchor="mm",
+        stroke_width=2,
+        stroke_fill=stroke_color,
+    )
+
+    draw.text(
+        premium_position,
+        f"${premium}",
+        font=value_font,
+        fill=text_color,
+        anchor="mm",
+        stroke_width=2,
+        stroke_fill=stroke_color,
+    )
+
+    draw.text(
+        date_position,
+        get_today(),
+        font=date_font,
+        fill=text_color,
+        anchor="mm",
+        stroke_width=2,
+        stroke_fill=stroke_color,
+    )
+
+    output = BytesIO()
+    output.name = f"quiet_alpha_{signal_type.lower()}.jpg"
+
+    image.save(
+        output,
+        format="JPEG",
+        quality=95,
+        optimize=True,
+    )
+
+    output.seek(0)
+    return output
+
+
+# =========================================================
+# إرسال البطاقة إلى القناة
+# =========================================================
+
+async def publish_signal(
     context: ContextTypes.DEFAULT_TYPE,
     signal_type: str,
     strike: str,
     premium: str,
 ) -> None:
-    """إرسال الصفقة إلى قناة Quiet Alpha."""
 
-    if signal_type == "CALL":
-        signal_icon = "🟢"
-        contract_suffix = "C"
-    else:
-        signal_icon = "🔴"
-        contract_suffix = "P"
+    card = create_signal_card(
+        signal_type=signal_type,
+        strike=strike,
+        premium=premium,
+    )
 
-    safe_strike = html.escape(strike)
-    safe_premium = html.escape(premium)
-
-    message = (
-        "🦋 <b>QUIET ALPHA</b>\n\n"
-        f"{signal_icon} <b>{signal_type}</b>\n\n"
-        f"📍 <b>ENTRY:</b> {safe_strike}{contract_suffix}\n"
-        f"💰 <b>PREMIUM:</b> ${safe_premium}\n"
-        f"📅 <b>DATE:</b> {get_today()}\n"
-        "🎯 <b>CONTRACT GOAL:</b> $100\n\n"
-        "<i>Precision. Discipline. Consistency.</i>\n\n"
+    caption = (
+        f"🦋 <b>QUIET ALPHA — {signal_type}</b>\n\n"
+        f"📍 <b>Contract:</b> {strike}"
+        f"{'C' if signal_type == 'CALL' else 'P'}\n"
+        f"💰 <b>Premium:</b> ${premium}\n\n"
         "هذه ليست توصية استثمارية أو دعوة للشراء أو البيع."
     )
 
-    await context.bot.send_message(
+    await context.bot.send_photo(
         chat_id=SIGNAL_CHAT_ID,
-        text=message,
+        photo=card,
+        caption=caption,
         parse_mode=ParseMode.HTML,
     )
 
@@ -128,11 +232,11 @@ async def start_command(
 
     message = (
         "🦋 <b>Quiet Alpha Bot</b>\n\n"
-        "البوت جاهز لاستقبال الصفقات.\n\n"
-        "🟢 لإرسال CALL:\n"
-        "<code>/c 6210 4.20</code>\n\n"
-        "🔴 لإرسال PUT:\n"
-        "<code>/p 6210 3.80</code>\n\n"
+        "البوت جاهز لإنشاء البطاقات.\n\n"
+        "🟢 CALL:\n"
+        "<code>/c 7555 3.90</code>\n\n"
+        "🔴 PUT:\n"
+        "<code>/p 7555 3.90</code>\n\n"
         "الرقم الأول: الاسترايك\n"
         "الرقم الثاني: سعر العقد"
     )
@@ -145,7 +249,6 @@ async def start_command(
 
 # =========================================================
 # أمر CALL
-# /c 6210 4.20
 # =========================================================
 
 async def call_command(
@@ -158,9 +261,8 @@ async def call_command(
 
     if len(context.args) != 2:
         await update.message.reply_text(
-            "❌ الاستخدام غير صحيح.\n\n"
-            "اكتبي مثلًا:\n"
-            "/c 6210 4.20"
+            "❌ الاستخدام الصحيح:\n"
+            "/c 7555 3.90"
         )
         return
 
@@ -168,7 +270,7 @@ async def call_command(
         strike = format_strike(context.args[0])
         premium = format_premium(context.args[1])
 
-        await send_signal_to_channel(
+        await publish_signal(
             context=context,
             signal_type="CALL",
             strike=strike,
@@ -176,28 +278,26 @@ async def call_command(
         )
 
         await update.message.reply_text(
-            "✅ تم نشر صفقة CALL في قناة Quiet Alpha."
+            "✅ تم إنشاء ونشر بطاقة CALL."
         )
 
     except ValueError:
         await update.message.reply_text(
-            "❌ الاسترايك وسعر العقد يجب أن يكونا أرقامًا.\n\n"
-            "مثال:\n"
-            "/c 6210 4.20"
+            "❌ الاسترايك والبريميوم يجب أن يكونا أرقامًا.\n"
+            "مثال: /c 7555 3.90"
         )
 
-    except Exception:
-        logger.exception("Failed to publish CALL signal")
+    except Exception as error:
+        logger.exception("Failed to publish CALL card")
 
         await update.message.reply_text(
-            "❌ تعذر نشر صفقة CALL.\n"
-            "راجعي BOT_TOKEN وSIGNAL_CHAT_ID وصلاحيات البوت."
+            f"❌ تعذر إنشاء بطاقة CALL.\n"
+            f"الخطأ: {type(error).__name__}"
         )
 
 
 # =========================================================
 # أمر PUT
-# /p 6210 3.80
 # =========================================================
 
 async def put_command(
@@ -210,9 +310,8 @@ async def put_command(
 
     if len(context.args) != 2:
         await update.message.reply_text(
-            "❌ الاستخدام غير صحيح.\n\n"
-            "اكتبي مثلًا:\n"
-            "/p 6210 3.80"
+            "❌ الاستخدام الصحيح:\n"
+            "/p 7555 3.90"
         )
         return
 
@@ -220,7 +319,7 @@ async def put_command(
         strike = format_strike(context.args[0])
         premium = format_premium(context.args[1])
 
-        await send_signal_to_channel(
+        await publish_signal(
             context=context,
             signal_type="PUT",
             strike=strike,
@@ -228,27 +327,26 @@ async def put_command(
         )
 
         await update.message.reply_text(
-            "✅ تم نشر صفقة PUT في قناة Quiet Alpha."
+            "✅ تم إنشاء ونشر بطاقة PUT."
         )
 
     except ValueError:
         await update.message.reply_text(
-            "❌ الاسترايك وسعر العقد يجب أن يكونا أرقامًا.\n\n"
-            "مثال:\n"
-            "/p 6210 3.80"
+            "❌ الاسترايك والبريميوم يجب أن يكونا أرقامًا.\n"
+            "مثال: /p 7555 3.90"
         )
 
-    except Exception:
-        logger.exception("Failed to publish PUT signal")
+    except Exception as error:
+        logger.exception("Failed to publish PUT card")
 
         await update.message.reply_text(
-            "❌ تعذر نشر صفقة PUT.\n"
-            "راجعي BOT_TOKEN وSIGNAL_CHAT_ID وصلاحيات البوت."
+            f"❌ تعذر إنشاء بطاقة PUT.\n"
+            f"الخطأ: {type(error).__name__}"
         )
 
 
 # =========================================================
-# أمر حالة البوت
+# حالة البوت
 # =========================================================
 
 async def status_command(
@@ -259,9 +357,19 @@ async def status_command(
     if update.message is None:
         return
 
-    await update.message.reply_text(
-        "🟢 Quiet Alpha Bot is online."
+    templates_status = (
+        CALL_TEMPLATE.exists()
+        and PUT_TEMPLATE.exists()
     )
+
+    if templates_status:
+        await update.message.reply_text(
+            "🟢 البوت يعمل وقوالب CALL وPUT موجودة."
+        )
+    else:
+        await update.message.reply_text(
+            "🟠 البوت يعمل، لكن أحد قوالب الصور غير موجود."
+        )
 
 
 # =========================================================
@@ -274,7 +382,7 @@ async def error_handler(
 ) -> None:
 
     logger.error(
-        "An error occurred while processing an update",
+        "Telegram update caused an error",
         exc_info=context.error,
     )
 
@@ -309,7 +417,7 @@ def main() -> None:
 
     application.add_error_handler(error_handler)
 
-    logger.info("Quiet Alpha Bot started successfully")
+    logger.info("Quiet Alpha Card Bot started successfully")
 
     application.run_polling(
         drop_pending_updates=True
