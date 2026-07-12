@@ -48,8 +48,6 @@ logger = logging.getLogger("quiet-alpha-bot")
 # =========================================================
 
 def format_strike(value: str) -> str:
-    """التحقق من الاسترايك وتنسيقه."""
-
     strike = float(value)
 
     if strike <= 0:
@@ -62,8 +60,6 @@ def format_strike(value: str) -> str:
 
 
 def format_premium(value: str) -> str:
-    """التحقق من سعر العقد وعرضه بمنزلتين عشريتين."""
-
     premium = float(value)
 
     if premium <= 0:
@@ -73,19 +69,15 @@ def format_premium(value: str) -> str:
 
 
 def get_today() -> str:
-    """تاريخ اليوم حسب توقيت السعودية."""
-
     now = datetime.now(RIYADH_TIMEZONE)
     return now.strftime("%d %b %Y")
 
 
 # =========================================================
-# تحميل الخط
+# الخطوط
 # =========================================================
 
 def load_font(size: int) -> ImageFont.ImageFont:
-    """تحميل خط واضح ومتوافق مع Railway."""
-
     font_paths = [
         "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
         "/usr/share/fonts/dejavu/DejaVuSans-Bold.ttf",
@@ -106,7 +98,7 @@ def load_font(size: int) -> ImageFont.ImageFont:
 
 
 # =========================================================
-# كتابة النص في منتصف الخانة
+# كتابة النص داخل البطاقة
 # =========================================================
 
 def draw_centered_text(
@@ -114,8 +106,8 @@ def draw_centered_text(
     position: tuple[int, int],
     text: str,
     font: ImageFont.ImageFont,
+    stroke_width: int,
 ) -> None:
-    """كتابة النص بوضوح وفي منتصف الموضع."""
 
     draw.text(
         position,
@@ -123,7 +115,7 @@ def draw_centered_text(
         font=font,
         fill=(255, 255, 255),
         anchor="mm",
-        stroke_width=2,
+        stroke_width=stroke_width,
         stroke_fill=(0, 0, 0),
     )
 
@@ -137,7 +129,6 @@ def create_signal_card(
     strike: str,
     premium: str,
 ) -> BytesIO:
-    """كتابة الاسترايك والبريميوم والتاريخ داخل البطاقة."""
 
     if signal_type == "CALL":
         template_path = CALL_TEMPLATE
@@ -162,35 +153,38 @@ def create_signal_card(
 
     width, height = image.size
 
-    # حجم واضح ومناسب لدقة بطاقاتك
+    # خط العقد والسعر كبير وواضح
     value_font = load_font(
-        max(76, int(width * 0.064))
+        max(105, int(width * 0.090))
     )
 
+    # التاريخ أصغر قليلًا حتى يناسب الخانة
     date_font = load_font(
-        max(50, int(width * 0.043))
+        max(70, int(width * 0.058))
+    )
+
+    stroke_width = max(
+        2,
+        int(width * 0.0025),
     )
 
     # =====================================================
-    # مواقع الكتابة داخل البطاقة
+    # مواقع النصوص داخل البطاقة
     # =====================================================
 
-    # منتصف خانة ENTRY
     entry_position = (
         int(width * 0.325),
         int(height * 0.405),
     )
 
-    # منتصف خانة DATE
     date_position = (
         int(width * 0.775),
         int(height * 0.405),
     )
 
-    # منتصف خانة PREMIUM
     premium_position = (
         int(width * 0.325),
-        int(height * 0.510),
+        int(height * 0.515),
     )
 
     draw_centered_text(
@@ -198,6 +192,7 @@ def create_signal_card(
         position=entry_position,
         text=contract,
         font=value_font,
+        stroke_width=stroke_width,
     )
 
     draw_centered_text(
@@ -205,6 +200,7 @@ def create_signal_card(
         position=premium_position,
         text=f"${premium}",
         font=value_font,
+        stroke_width=stroke_width,
     )
 
     draw_centered_text(
@@ -212,6 +208,7 @@ def create_signal_card(
         position=date_position,
         text=get_today(),
         font=date_font,
+        stroke_width=stroke_width,
     )
 
     output = BytesIO()
@@ -220,7 +217,7 @@ def create_signal_card(
     image.save(
         output,
         format="JPEG",
-        quality=95,
+        quality=96,
         optimize=True,
     )
 
@@ -240,7 +237,6 @@ async def publish_signal(
     strike: str,
     premium: str,
 ) -> None:
-    """إرسال البطاقة كصورة فقط، بدون نص أسفلها."""
 
     card = create_signal_card(
         signal_type=signal_type,
@@ -276,10 +272,10 @@ async def start_command(
 
     message = (
         "🦋 <b>Quiet Alpha Bot</b>\n\n"
-        "البوت جاهز لإنشاء بطاقات الصفقات.\n\n"
-        "🟢 لإرسال CALL:\n"
+        "البوت جاهز لإنشاء البطاقات.\n\n"
+        "🟢 CALL:\n"
         "<code>/c 7555 3.90</code>\n\n"
-        "🔴 لإرسال PUT:\n"
+        "🔴 PUT:\n"
         "<code>/p 7555 3.90</code>\n\n"
         "الرقم الأول: الاسترايك\n"
         "الرقم الثاني: سعر العقد"
@@ -305,7 +301,7 @@ async def call_command(
 
     if len(context.args) != 2:
         await update.message.reply_text(
-            "❌ الاستخدام الصحيح:\n\n"
+            "❌ الاستخدام الصحيح:\n"
             "/c 7555 3.90"
         )
         return
@@ -327,9 +323,8 @@ async def call_command(
 
     except ValueError:
         await update.message.reply_text(
-            "❌ الاسترايك وسعر العقد يجب أن يكونا أرقامًا صحيحة.\n\n"
-            "مثال:\n"
-            "/c 7555 3.90"
+            "❌ الاسترايك والبريميوم يجب أن يكونا أرقامًا.\n"
+            "مثال: /c 7555 3.90"
         )
 
     except FileNotFoundError:
@@ -362,7 +357,7 @@ async def put_command(
 
     if len(context.args) != 2:
         await update.message.reply_text(
-            "❌ الاستخدام الصحيح:\n\n"
+            "❌ الاستخدام الصحيح:\n"
             "/p 7555 3.90"
         )
         return
@@ -384,9 +379,8 @@ async def put_command(
 
     except ValueError:
         await update.message.reply_text(
-            "❌ الاسترايك وسعر العقد يجب أن يكونا أرقامًا صحيحة.\n\n"
-            "مثال:\n"
-            "/p 7555 3.90"
+            "❌ الاسترايك والبريميوم يجب أن يكونا أرقامًا.\n"
+            "مثال: /p 7555 3.90"
         )
 
     except FileNotFoundError:
@@ -406,7 +400,7 @@ async def put_command(
 
 
 # =========================================================
-# أمر /status
+# حالة البوت
 # =========================================================
 
 async def status_command(
@@ -445,7 +439,7 @@ async def status_command(
 
 
 # =========================================================
-# معالجة الأخطاء العامة
+# معالجة الأخطاء
 # =========================================================
 
 async def error_handler(
