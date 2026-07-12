@@ -45,21 +45,44 @@ logger = logging.getLogger("quiet-alpha-bot")
 
 # =========================================================
 # إعدادات خانات البطاقة
-# القيم عبارة عن نسب من عرض وارتفاع الصورة
+#
+# القيم عبارة عن نسب من عرض وارتفاع الصورة:
+# left, top, right, bottom
 # =========================================================
 
-ENTRY_BOX = (0.19, 0.365, 0.48, 0.445)
-DATE_BOX = (0.63, 0.365, 0.94, 0.445)
-PREMIUM_BOX = (0.19, 0.470, 0.48, 0.550)
+ENTRY_BOX = (
+    0.19,
+    0.365,
+    0.48,
+    0.445,
+)
 
+DATE_BOX = (
+    0.63,
+    0.365,
+    0.94,
+    0.445,
+)
+
+PREMIUM_BOX = (
+    0.19,
+    0.470,
+    0.48,
+    0.550,
+)
+
+
+# أكبر حجم للخط كنسبة من عرض البطاقة
 ENTRY_MAX_FONT_RATIO = 0.105
 PREMIUM_MAX_FONT_RATIO = 0.105
 DATE_MAX_FONT_RATIO = 0.065
 
+# أصغر حجم مسموح للخط
 MIN_FONT_RATIO = 0.032
 
 TEXT_COLOR = (255, 255, 255)
 STROKE_COLOR = (5, 5, 5)
+STROKE_WIDTH_RATIO = 0.0025
 
 
 # =========================================================
@@ -67,10 +90,14 @@ STROKE_COLOR = (5, 5, 5)
 # =========================================================
 
 def format_strike(value: str) -> str:
+    """التحقق من الاسترايك وتنسيقه."""
+
     strike = float(value)
 
     if strike <= 0:
-        raise ValueError("Strike must be greater than zero")
+        raise ValueError(
+            "Strike must be greater than zero"
+        )
 
     if strike.is_integer():
         return str(int(strike))
@@ -79,53 +106,107 @@ def format_strike(value: str) -> str:
 
 
 def format_premium(value: str) -> str:
+    """التحقق من سعر العقد وتنسيقه."""
+
     premium = float(value)
 
     if premium <= 0:
-        raise ValueError("Premium must be greater than zero")
+        raise ValueError(
+            "Premium must be greater than zero"
+        )
 
     return f"{premium:.2f}"
 
 
 def get_today() -> str:
+    """تاريخ اليوم حسب توقيت السعودية."""
+
     now = datetime.now(RIYADH_TIMEZONE)
-    return now.strftime("%d %b %Y")
+
+    return now.strftime(
+        "%d %b %Y"
+    )
 
 
 # =========================================================
-# الخطوط
+# تحميل الخط
+#
+# لا يوقف البوت إذا لم يوجد خط في Railway.
 # =========================================================
 
-def get_font_path() -> str:
+def load_font(size: int):
+    """تحميل خط مناسب، مع خط احتياطي آمن."""
+
+    requested_size = max(
+        1,
+        int(size),
+    )
+
     font_paths = [
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-        "/usr/share/fonts/dejavu/DejaVuSans-Bold.ttf",
-        "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf",
-        "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
-        "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
+        (
+            "/usr/share/fonts/truetype/"
+            "dejavu/DejaVuSans-Bold.ttf"
+        ),
+        (
+            "/usr/share/fonts/dejavu/"
+            "DejaVuSans-Bold.ttf"
+        ),
+        (
+            "/usr/share/fonts/truetype/"
+            "liberation2/LiberationSans-Bold.ttf"
+        ),
+        (
+            "/usr/share/fonts/truetype/"
+            "liberation/LiberationSans-Bold.ttf"
+        ),
+        (
+            "/usr/share/fonts/truetype/"
+            "freefont/FreeSansBold.ttf"
+        ),
+        (
+            "/usr/share/fonts/truetype/"
+            "noto/NotoSans-Bold.ttf"
+        ),
+        (
+            "/System/Library/Fonts/"
+            "Supplemental/Arial Bold.ttf"
+        ),
     ]
 
     for font_path in font_paths:
-        if os.path.exists(font_path):
-            return font_path
+        if not os.path.exists(font_path):
+            continue
 
-    raise FileNotFoundError(
-        "No supported TrueType font was found."
+        try:
+            return ImageFont.truetype(
+                font_path,
+                size=requested_size,
+            )
+
+        except Exception:
+            logger.exception(
+                "Could not load font: %s",
+                font_path,
+            )
+
+    logger.warning(
+        "No TrueType font found. "
+        "Using Pillow default font."
     )
 
+    # في إصدارات Pillow الحديثة يمكن تكبير الخط الافتراضي.
+    try:
+        return ImageFont.load_default(
+            size=requested_size
+        )
 
-FONT_PATH = get_font_path()
-
-
-def load_font(size: int) -> ImageFont.FreeTypeFont:
-    return ImageFont.truetype(
-        FONT_PATH,
-        size=max(1, int(size)),
-    )
+    except TypeError:
+        # دعم إصدارات Pillow الأقدم بدون إيقاف البوت.
+        return ImageFont.load_default()
 
 
 # =========================================================
-# تحويل الخانات من نسب إلى بكسلات
+# تحويل الخانة من نسب إلى بكسلات
 # =========================================================
 
 def scale_box(
@@ -133,6 +214,7 @@ def scale_box(
     width: int,
     height: int,
 ) -> tuple[int, int, int, int]:
+    """تحويل نسب الخانة إلى إحداثيات فعلية."""
 
     left, top, right, bottom = box
 
@@ -145,7 +227,7 @@ def scale_box(
 
 
 # =========================================================
-# اختيار أكبر خط يناسب الخانة
+# اختيار أكبر خط يناسب الخانة تلقائيًا
 # =========================================================
 
 def fit_font_to_box(
@@ -154,15 +236,23 @@ def fit_font_to_box(
     box: tuple[int, int, int, int],
     card_width: int,
     maximum_font_ratio: float,
-) -> ImageFont.FreeTypeFont:
+):
+    """اختيار أكبر خط يدخل داخل الخانة."""
 
     left, top, right, bottom = box
 
     box_width = right - left
     box_height = bottom - top
 
-    horizontal_padding = int(box_width * 0.05)
-    vertical_padding = int(box_height * 0.05)
+    horizontal_padding = max(
+        4,
+        int(box_width * 0.04),
+    )
+
+    vertical_padding = max(
+        2,
+        int(box_height * 0.04),
+    )
 
     available_width = max(
         1,
@@ -180,13 +270,13 @@ def fit_font_to_box(
     )
 
     minimum_size = max(
-        1,
+        18,
         int(card_width * MIN_FONT_RATIO),
     )
 
     stroke_width = max(
         1,
-        int(card_width * 0.0025),
+        int(card_width * STROKE_WIDTH_RATIO),
     )
 
     for font_size in range(
@@ -203,8 +293,13 @@ def fit_font_to_box(
             stroke_width=stroke_width,
         )
 
-        text_width = bounds[2] - bounds[0]
-        text_height = bounds[3] - bounds[1]
+        text_width = (
+            bounds[2] - bounds[0]
+        )
+
+        text_height = (
+            bounds[3] - bounds[1]
+        )
 
         if (
             text_width <= available_width
@@ -226,11 +321,17 @@ def draw_text_in_box(
     card_width: int,
     maximum_font_ratio: float,
 ) -> None:
+    """كتابة النص بحجم كبير وفي منتصف الخانة."""
 
     left, top, right, bottom = box
 
-    center_x = (left + right) // 2
-    center_y = (top + bottom) // 2
+    center_x = (
+        left + right
+    ) // 2
+
+    center_y = (
+        top + bottom
+    ) // 2
 
     font = fit_font_to_box(
         draw=draw,
@@ -242,7 +343,7 @@ def draw_text_in_box(
 
     stroke_width = max(
         1,
-        int(card_width * 0.0025),
+        int(card_width * STROKE_WIDTH_RATIO),
     )
 
     draw.text(
@@ -265,6 +366,7 @@ def create_signal_card(
     strike: str,
     premium: str,
 ) -> BytesIO:
+    """إنشاء بطاقة CALL أو PUT وتعبئة الخانات."""
 
     if signal_type == "CALL":
         template_path = CALL_TEMPLATE
@@ -275,7 +377,9 @@ def create_signal_card(
         contract = f"{strike}P"
 
     else:
-        raise ValueError("Unsupported signal type")
+        raise ValueError(
+            "Unsupported signal type"
+        )
 
     if not template_path.exists():
         raise FileNotFoundError(
@@ -308,31 +412,41 @@ def create_signal_card(
         height,
     )
 
+    # العقد
     draw_text_in_box(
         draw=draw,
         text=contract,
         box=entry_box,
         card_width=width,
-        maximum_font_ratio=ENTRY_MAX_FONT_RATIO,
+        maximum_font_ratio=(
+            ENTRY_MAX_FONT_RATIO
+        ),
     )
 
+    # سعر العقد
     draw_text_in_box(
         draw=draw,
         text=f"${premium}",
         box=premium_box,
         card_width=width,
-        maximum_font_ratio=PREMIUM_MAX_FONT_RATIO,
+        maximum_font_ratio=(
+            PREMIUM_MAX_FONT_RATIO
+        ),
     )
 
+    # التاريخ
     draw_text_in_box(
         draw=draw,
         text=get_today(),
         box=date_box,
         card_width=width,
-        maximum_font_ratio=DATE_MAX_FONT_RATIO,
+        maximum_font_ratio=(
+            DATE_MAX_FONT_RATIO
+        ),
     )
 
     output = BytesIO()
+
     output.name = (
         f"quiet_alpha_"
         f"{signal_type.lower()}_card.jpg"
@@ -346,6 +460,7 @@ def create_signal_card(
     )
 
     output.seek(0)
+
     image.close()
 
     return output
@@ -361,6 +476,7 @@ async def publish_signal(
     strike: str,
     premium: str,
 ) -> None:
+    """إرسال الصورة فقط دون نص أسفلها."""
 
     card = create_signal_card(
         signal_type=signal_type,
@@ -431,8 +547,13 @@ async def call_command(
         return
 
     try:
-        strike = format_strike(context.args[0])
-        premium = format_premium(context.args[1])
+        strike = format_strike(
+            context.args[0]
+        )
+
+        premium = format_premium(
+            context.args[1]
+        )
 
         await publish_signal(
             context=context,
@@ -447,19 +568,19 @@ async def call_command(
 
     except (ValueError, TypeError):
         await update.message.reply_text(
-            "❌ الاسترايك وسعر العقد يجب أن "
-            "يكونا أرقامًا صحيحة.\n\n"
+            "❌ الاسترايك وسعر العقد يجب "
+            "أن يكونا أرقامًا صحيحة.\n\n"
             "مثال:\n"
             "/c 7555 3.90"
         )
 
     except FileNotFoundError as error:
         logger.exception(
-            "CALL template or font was not found"
+            "CALL template was not found"
         )
 
         await update.message.reply_text(
-            "❌ ملف قالب CALL أو الخط غير موجود.\n"
+            "❌ لم أجد ملف قالب CALL.\n"
             f"{error}"
         )
 
@@ -470,7 +591,8 @@ async def call_command(
 
         await update.message.reply_text(
             "❌ تعذر إنشاء بطاقة CALL.\n"
-            f"نوع الخطأ: {type(error).__name__}"
+            f"نوع الخطأ: "
+            f"{type(error).__name__}"
         )
 
 
@@ -494,8 +616,13 @@ async def put_command(
         return
 
     try:
-        strike = format_strike(context.args[0])
-        premium = format_premium(context.args[1])
+        strike = format_strike(
+            context.args[0]
+        )
+
+        premium = format_premium(
+            context.args[1]
+        )
 
         await publish_signal(
             context=context,
@@ -510,19 +637,19 @@ async def put_command(
 
     except (ValueError, TypeError):
         await update.message.reply_text(
-            "❌ الاسترايك وسعر العقد يجب أن "
-            "يكونا أرقامًا صحيحة.\n\n"
+            "❌ الاسترايك وسعر العقد يجب "
+            "أن يكونا أرقامًا صحيحة.\n\n"
             "مثال:\n"
             "/p 7555 3.90"
         )
 
     except FileNotFoundError as error:
         logger.exception(
-            "PUT template or font was not found"
+            "PUT template was not found"
         )
 
         await update.message.reply_text(
-            "❌ ملف قالب PUT أو الخط غير موجود.\n"
+            "❌ لم أجد ملف قالب PUT.\n"
             f"{error}"
         )
 
@@ -533,7 +660,8 @@ async def put_command(
 
         await update.message.reply_text(
             "❌ تعذر إنشاء بطاقة PUT.\n"
-            f"نوع الخطأ: {type(error).__name__}"
+            f"نوع الخطأ: "
+            f"{type(error).__name__}"
         )
 
 
@@ -575,10 +703,14 @@ async def status_command(
         message = (
             "🟠 البوت يعمل، لكن القوالب "
             "التالية غير موجودة:\n"
-            + "\n".join(missing_templates)
+            + "\n".join(
+                missing_templates
+            )
         )
 
-    await update.message.reply_text(message)
+    await update.message.reply_text(
+        message
+    )
 
 
 # =========================================================
@@ -641,7 +773,8 @@ def main() -> None:
     )
 
     logger.info(
-        "Quiet Alpha Card Bot started successfully"
+        "Quiet Alpha Card Bot "
+        "started successfully"
     )
 
     application.run_polling(
