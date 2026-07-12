@@ -72,17 +72,17 @@ PREMIUM_BOX = (
 )
 
 
-# أكبر حجم للخط كنسبة من عرض البطاقة
-ENTRY_MAX_FONT_RATIO = 0.105
-PREMIUM_MAX_FONT_RATIO = 0.105
-DATE_MAX_FONT_RATIO = 0.065
+# أحجام متوازنة وأصغر قليلًا
+ENTRY_MAX_FONT_RATIO = 0.075
+PREMIUM_MAX_FONT_RATIO = 0.075
+DATE_MAX_FONT_RATIO = 0.046
 
 # أصغر حجم مسموح للخط
-MIN_FONT_RATIO = 0.032
+MIN_FONT_RATIO = 0.026
 
 TEXT_COLOR = (255, 255, 255)
 STROKE_COLOR = (5, 5, 5)
-STROKE_WIDTH_RATIO = 0.0025
+STROKE_WIDTH_RATIO = 0.0020
 
 
 # =========================================================
@@ -131,7 +131,7 @@ def get_today() -> str:
 # =========================================================
 # تحميل الخط
 #
-# لا يوقف البوت إذا لم يوجد خط في Railway.
+# لا يوقف البوت إذا لم يوجد خط في Railway
 # =========================================================
 
 def load_font(size: int):
@@ -194,14 +194,12 @@ def load_font(size: int):
         "Using Pillow default font."
     )
 
-    # في إصدارات Pillow الحديثة يمكن تكبير الخط الافتراضي.
     try:
         return ImageFont.load_default(
             size=requested_size
         )
 
     except TypeError:
-        # دعم إصدارات Pillow الأقدم بدون إيقاف البوت.
         return ImageFont.load_default()
 
 
@@ -246,12 +244,12 @@ def fit_font_to_box(
 
     horizontal_padding = max(
         4,
-        int(box_width * 0.04),
+        int(box_width * 0.06),
     )
 
     vertical_padding = max(
         2,
-        int(box_height * 0.04),
+        int(box_height * 0.06),
     )
 
     available_width = max(
@@ -321,7 +319,7 @@ def draw_text_in_box(
     card_width: int,
     maximum_font_ratio: float,
 ) -> None:
-    """كتابة النص بحجم كبير وفي منتصف الخانة."""
+    """كتابة النص بحجم متوازن وفي منتصف الخانة."""
 
     left, top, right, bottom = box
 
@@ -370,11 +368,11 @@ def create_signal_card(
 
     if signal_type == "CALL":
         template_path = CALL_TEMPLATE
-        contract = f"{strike}C"
+        contract = strike
 
     elif signal_type == "PUT":
         template_path = PUT_TEMPLATE
-        contract = f"{strike}P"
+        contract = strike
 
     else:
         raise ValueError(
@@ -412,7 +410,7 @@ def create_signal_card(
         height,
     )
 
-    # العقد
+    # الاسترايك بدون C أو P
     draw_text_in_box(
         draw=draw,
         text=contract,
