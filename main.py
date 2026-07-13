@@ -23,6 +23,7 @@ BASE_DIR = Path(__file__).resolve().parent
 
 CALL_TEMPLATE = BASE_DIR / "call_card.jpg"
 PUT_TEMPLATE = BASE_DIR / "put_card.jpg"
+SUCCESS_TEMPLATE = BASE_DIR / "success_card.jpg"
 
 if not BOT_TOKEN:
     raise ValueError("BOT_TOKEN is missing")
@@ -44,9 +45,8 @@ logger = logging.getLogger("quiet-alpha-bot")
 
 
 # =========================================================
-# إعدادات خانات البطاقة
+# خانات بطاقات CALL وPUT
 #
-# القيم عبارة عن نسب من عرض وارتفاع الصورة:
 # left, top, right, bottom
 # =========================================================
 
@@ -73,14 +73,42 @@ PREMIUM_BOX = (
 
 
 # =========================================================
+# خانات بطاقة الصفقة الناجحة
+# success_card.jpg = 1536 × 1024
+# =========================================================
+
+SUCCESS_ENTRY_BOX = (
+    0.08,
+    0.655,
+    0.33,
+    0.785,
+)
+
+SUCCESS_EXIT_BOX = (
+    0.36,
+    0.655,
+    0.63,
+    0.785,
+)
+
+SUCCESS_DATE_BOX = (
+    0.22,
+    0.855,
+    0.48,
+    0.955,
+)
+
+
+# =========================================================
 # أحجام الخط
-#
-# الاسترايك والسعر والتاريخ بنفس الحجم
 # =========================================================
 
 ENTRY_MAX_FONT_RATIO = 0.046
 PREMIUM_MAX_FONT_RATIO = 0.046
 DATE_MAX_FONT_RATIO = 0.046
+
+SUCCESS_PRICE_FONT_RATIO = 0.060
+SUCCESS_DATE_FONT_RATIO = 0.040
 
 MIN_FONT_RATIO = 0.024
 
@@ -89,10 +117,9 @@ MIN_FONT_RATIO = 0.024
 # ألوان النص
 # =========================================================
 
-# ذهبي متناسق مع تصميم البطاقة
 TEXT_COLOR = (218, 165, 75)
+SUCCESS_TEXT_COLOR = (218, 165, 75)
 
-# حدود داكنة خفيفة لزيادة وضوح الخط
 STROKE_COLOR = (10, 7, 3)
 STROKE_WIDTH_RATIO = 0.0015
 
@@ -102,8 +129,6 @@ STROKE_WIDTH_RATIO = 0.0015
 # =========================================================
 
 def format_strike(value: str) -> str:
-    """التحقق من الاسترايك وتنسيقه."""
-
     strike = float(value)
 
     if strike <= 0:
@@ -118,8 +143,6 @@ def format_strike(value: str) -> str:
 
 
 def format_premium(value: str) -> str:
-    """التحقق من سعر العقد وتنسيقه."""
-
     premium = float(value)
 
     if premium <= 0:
@@ -131,8 +154,6 @@ def format_premium(value: str) -> str:
 
 
 def get_today() -> str:
-    """تاريخ اليوم حسب توقيت السعودية."""
-
     now = datetime.now(RIYADH_TIMEZONE)
 
     return now.strftime(
@@ -142,13 +163,9 @@ def get_today() -> str:
 
 # =========================================================
 # تحميل الخط
-#
-# لا يوقف البوت إذا لم يوجد خط في Railway
 # =========================================================
 
 def load_font(size: int):
-    """تحميل خط مناسب، مع خط احتياطي آمن."""
-
     requested_size = max(
         1,
         int(size),
@@ -224,7 +241,6 @@ def scale_box(
     width: int,
     height: int,
 ) -> tuple[int, int, int, int]:
-    """تحويل نسب الخانة إلى إحداثيات فعلية."""
 
     left, top, right, bottom = box
 
@@ -237,7 +253,7 @@ def scale_box(
 
 
 # =========================================================
-# اختيار أكبر خط يناسب الخانة تلقائيًا
+# اختيار أكبر خط يناسب الخانة
 # =========================================================
 
 def fit_font_to_box(
@@ -247,8 +263,6 @@ def fit_font_to_box(
     card_width: int,
     maximum_font_ratio: float,
 ):
-    """اختيار أكبر خط يدخل داخل الخانة."""
-
     left, top, right, bottom = box
 
     box_width = right - left
@@ -303,13 +317,8 @@ def fit_font_to_box(
             stroke_width=stroke_width,
         )
 
-        text_width = (
-            bounds[2] - bounds[0]
-        )
-
-        text_height = (
-            bounds[3] - bounds[1]
-        )
+        text_width = bounds[2] - bounds[0]
+        text_height = bounds[3] - bounds[1]
 
         if (
             text_width <= available_width
@@ -321,7 +330,7 @@ def fit_font_to_box(
 
 
 # =========================================================
-# كتابة النص في منتصف الخانة
+# كتابة النص داخل الخانة
 # =========================================================
 
 def draw_text_in_box(
@@ -330,8 +339,8 @@ def draw_text_in_box(
     box: tuple[int, int, int, int],
     card_width: int,
     maximum_font_ratio: float,
+    text_color: tuple[int, int, int] = TEXT_COLOR,
 ) -> None:
-    """كتابة النص باللون الذهبي وفي منتصف الخانة."""
 
     left, top, right, bottom = box
 
@@ -360,7 +369,7 @@ def draw_text_in_box(
         (center_x, center_y),
         text,
         font=font,
-        fill=TEXT_COLOR,
+        fill=text_color,
         anchor="mm",
         stroke_width=stroke_width,
         stroke_fill=STROKE_COLOR,
@@ -368,7 +377,7 @@ def draw_text_in_box(
 
 
 # =========================================================
-# إنشاء بطاقة Quiet Alpha
+# إنشاء بطاقة CALL أو PUT
 # =========================================================
 
 def create_signal_card(
@@ -376,7 +385,6 @@ def create_signal_card(
     strike: str,
     premium: str,
 ) -> BytesIO:
-    """إنشاء بطاقة CALL أو PUT وتعبئة الخانات."""
 
     if signal_type == "CALL":
         template_path = CALL_TEMPLATE
@@ -422,37 +430,28 @@ def create_signal_card(
         height,
     )
 
-    # الاسترايك بدون C أو P
     draw_text_in_box(
         draw=draw,
         text=contract,
         box=entry_box,
         card_width=width,
-        maximum_font_ratio=(
-            ENTRY_MAX_FONT_RATIO
-        ),
+        maximum_font_ratio=ENTRY_MAX_FONT_RATIO,
     )
 
-    # سعر العقد
     draw_text_in_box(
         draw=draw,
         text=f"${premium}",
         box=premium_box,
         card_width=width,
-        maximum_font_ratio=(
-            PREMIUM_MAX_FONT_RATIO
-        ),
+        maximum_font_ratio=PREMIUM_MAX_FONT_RATIO,
     )
 
-    # التاريخ
     draw_text_in_box(
         draw=draw,
         text=get_today(),
         box=date_box,
         card_width=width,
-        maximum_font_ratio=(
-            DATE_MAX_FONT_RATIO
-        ),
+        maximum_font_ratio=DATE_MAX_FONT_RATIO,
     )
 
     output = BytesIO()
@@ -470,14 +469,96 @@ def create_signal_card(
     )
 
     output.seek(0)
-
     image.close()
 
     return output
 
 
 # =========================================================
-# إرسال البطاقة إلى القناة
+# إنشاء بطاقة الصفقة الناجحة
+# =========================================================
+
+def create_success_card(
+    entry_price: str,
+    exit_price: str,
+) -> BytesIO:
+
+    if not SUCCESS_TEMPLATE.exists():
+        raise FileNotFoundError(
+            "Template image was not found: "
+            "success_card.jpg"
+        )
+
+    with Image.open(SUCCESS_TEMPLATE) as template:
+        image = template.convert("RGB")
+
+    draw = ImageDraw.Draw(image)
+
+    width, height = image.size
+
+    success_entry_box = scale_box(
+        SUCCESS_ENTRY_BOX,
+        width,
+        height,
+    )
+
+    success_exit_box = scale_box(
+        SUCCESS_EXIT_BOX,
+        width,
+        height,
+    )
+
+    success_date_box = scale_box(
+        SUCCESS_DATE_BOX,
+        width,
+        height,
+    )
+
+    draw_text_in_box(
+        draw=draw,
+        text=f"${entry_price}",
+        box=success_entry_box,
+        card_width=width,
+        maximum_font_ratio=SUCCESS_PRICE_FONT_RATIO,
+        text_color=SUCCESS_TEXT_COLOR,
+    )
+
+    draw_text_in_box(
+        draw=draw,
+        text=f"${exit_price}",
+        box=success_exit_box,
+        card_width=width,
+        maximum_font_ratio=SUCCESS_PRICE_FONT_RATIO,
+        text_color=SUCCESS_TEXT_COLOR,
+    )
+
+    draw_text_in_box(
+        draw=draw,
+        text=get_today(),
+        box=success_date_box,
+        card_width=width,
+        maximum_font_ratio=SUCCESS_DATE_FONT_RATIO,
+        text_color=SUCCESS_TEXT_COLOR,
+    )
+
+    output = BytesIO()
+    output.name = "quiet_alpha_success_card.jpg"
+
+    image.save(
+        output,
+        format="JPEG",
+        quality=96,
+        optimize=True,
+    )
+
+    output.seek(0)
+    image.close()
+
+    return output
+
+
+# =========================================================
+# إرسال بطاقة CALL أو PUT
 # =========================================================
 
 async def publish_signal(
@@ -486,12 +567,40 @@ async def publish_signal(
     strike: str,
     premium: str,
 ) -> None:
-    """إرسال الصورة فقط دون نص أسفلها."""
 
     card = create_signal_card(
         signal_type=signal_type,
         strike=strike,
         premium=premium,
+    )
+
+    try:
+        await context.bot.send_photo(
+            chat_id=SIGNAL_CHAT_ID,
+            photo=card,
+            connect_timeout=30,
+            read_timeout=90,
+            write_timeout=90,
+            pool_timeout=30,
+        )
+
+    finally:
+        card.close()
+
+
+# =========================================================
+# إرسال بطاقة الصفقة الناجحة
+# =========================================================
+
+async def publish_success_card(
+    context: ContextTypes.DEFAULT_TYPE,
+    entry_price: str,
+    exit_price: str,
+) -> None:
+
+    card = create_success_card(
+        entry_price=entry_price,
+        exit_price=exit_price,
     )
 
     try:
@@ -527,8 +636,11 @@ async def start_command(
         "<code>/c 7555 3.90</code>\n\n"
         "🔴 لإرسال PUT:\n"
         "<code>/p 7555 3.90</code>\n\n"
-        "الرقم الأول: الاسترايك\n"
-        "الرقم الثاني: سعر العقد"
+        "✅ لإرسال صفقة ناجحة:\n"
+        "<code>/win 3.90 4.90</code>\n\n"
+        "في أمر /win:\n"
+        "الرقم الأول سعر الدخول\n"
+        "الرقم الثاني السعر المحقق"
     )
 
     await update.message.reply_text(
@@ -601,8 +713,7 @@ async def call_command(
 
         await update.message.reply_text(
             "❌ تعذر إنشاء بطاقة CALL.\n"
-            f"نوع الخطأ: "
-            f"{type(error).__name__}"
+            f"نوع الخطأ: {type(error).__name__}"
         )
 
 
@@ -670,8 +781,84 @@ async def put_command(
 
         await update.message.reply_text(
             "❌ تعذر إنشاء بطاقة PUT.\n"
-            f"نوع الخطأ: "
-            f"{type(error).__name__}"
+            f"نوع الخطأ: {type(error).__name__}"
+        )
+
+
+# =========================================================
+# أمر /win
+# /win 3.90 4.90
+# =========================================================
+
+async def win_command(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+
+    if update.message is None:
+        return
+
+    if len(context.args) != 2:
+        await update.message.reply_text(
+            "❌ الاستخدام الصحيح:\n\n"
+            "/win 3.90 4.90\n\n"
+            "الرقم الأول: سعر الدخول\n"
+            "الرقم الثاني: السعر المحقق"
+        )
+        return
+
+    try:
+        entry_price = format_premium(
+            context.args[0]
+        )
+
+        exit_price = format_premium(
+            context.args[1]
+        )
+
+        if float(exit_price) <= float(entry_price):
+            await update.message.reply_text(
+                "❌ السعر المحقق يجب أن يكون "
+                "أعلى من سعر الدخول."
+            )
+            return
+
+        await publish_success_card(
+            context=context,
+            entry_price=entry_price,
+            exit_price=exit_price,
+        )
+
+        await update.message.reply_text(
+            "✅ تم إنشاء ونشر بطاقة الصفقة الناجحة."
+        )
+
+    except (ValueError, TypeError):
+        await update.message.reply_text(
+            "❌ سعر الدخول والسعر المحقق "
+            "يجب أن يكونا أرقامًا صحيحة.\n\n"
+            "مثال:\n"
+            "/win 3.90 4.90"
+        )
+
+    except FileNotFoundError as error:
+        logger.exception(
+            "Success template was not found"
+        )
+
+        await update.message.reply_text(
+            "❌ لم أجد ملف success_card.jpg.\n"
+            f"{error}"
+        )
+
+    except Exception as error:
+        logger.exception(
+            "Failed to publish success card"
+        )
+
+        await update.message.reply_text(
+            "❌ تعذر إنشاء بطاقة الصفقة الناجحة.\n"
+            f"نوع الخطأ: {type(error).__name__}"
         )
 
 
@@ -687,40 +874,34 @@ async def status_command(
     if update.message is None:
         return
 
-    call_exists = CALL_TEMPLATE.exists()
-    put_exists = PUT_TEMPLATE.exists()
+    templates = {
+        "call_card.jpg": CALL_TEMPLATE.exists(),
+        "put_card.jpg": PUT_TEMPLATE.exists(),
+        "success_card.jpg": SUCCESS_TEMPLATE.exists(),
+    }
 
-    if call_exists and put_exists:
+    missing_templates = [
+        name
+        for name, exists in templates.items()
+        if not exists
+    ]
+
+    if not missing_templates:
         message = (
             "🟢 البوت يعمل.\n"
             "✅ قالب CALL موجود.\n"
-            "✅ قالب PUT موجود."
+            "✅ قالب PUT موجود.\n"
+            "✅ قالب SUCCESS موجود."
         )
 
     else:
-        missing_templates = []
-
-        if not call_exists:
-            missing_templates.append(
-                "call_card.jpg"
-            )
-
-        if not put_exists:
-            missing_templates.append(
-                "put_card.jpg"
-            )
-
         message = (
             "🟠 البوت يعمل، لكن القوالب "
             "التالية غير موجودة:\n"
-            + "\n".join(
-                missing_templates
-            )
+            + "\n".join(missing_templates)
         )
 
-    await update.message.reply_text(
-        message
-    )
+    await update.message.reply_text(message)
 
 
 # =========================================================
@@ -773,6 +954,13 @@ def main() -> None:
 
     application.add_handler(
         CommandHandler(
+            ["win", "success"],
+            win_command,
+        )
+    )
+
+    application.add_handler(
+        CommandHandler(
             "status",
             status_command,
         )
@@ -783,8 +971,7 @@ def main() -> None:
     )
 
     logger.info(
-        "Quiet Alpha Card Bot "
-        "started successfully"
+        "Quiet Alpha Card Bot started successfully"
     )
 
     application.run_polling(
