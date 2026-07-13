@@ -25,6 +25,7 @@ CALL_TEMPLATE = BASE_DIR / "call_card.jpg"
 PUT_TEMPLATE = BASE_DIR / "put_card.jpg"
 SUCCESS_TEMPLATE = BASE_DIR / "success_card.jpg"
 HIGHEST_PRICE_TEMPLATE = BASE_DIR / "highest_price_card.jpg"
+STOP_LOSS_TEMPLATE = BASE_DIR / "Stop-Loss.jpg"
 
 if not BOT_TOKEN:
     raise ValueError("BOT_TOKEN is missing")
@@ -47,7 +48,6 @@ logger = logging.getLogger("quiet-alpha-bot")
 
 # =========================================================
 # خانات بطاقات CALL وPUT
-# left, top, right, bottom
 # =========================================================
 
 ENTRY_BOX = (
@@ -141,6 +141,33 @@ HIGHEST_DATE_BOX = (
 
 
 # =========================================================
+# خانات بطاقة وقف الخسارة
+# Stop-Loss.jpg = 1080 × 720
+# =========================================================
+
+STOP_ENTRY_BOX = (
+    0.055,
+    0.680,
+    0.315,
+    0.825,
+)
+
+STOP_LOSS_BOX = (
+    0.350,
+    0.680,
+    0.635,
+    0.825,
+)
+
+STOP_DATE_BOX = (
+    0.675,
+    0.680,
+    0.945,
+    0.825,
+)
+
+
+# =========================================================
 # أحجام الخط
 # =========================================================
 
@@ -154,7 +181,17 @@ SUCCESS_DATE_FONT_RATIO = 0.040
 HIGHEST_VALUE_FONT_RATIO = 0.050
 HIGHEST_DATE_FONT_RATIO = 0.036
 
+STOP_VALUE_FONT_RATIO = 0.060
+STOP_DATE_FONT_RATIO = 0.043
+
 MIN_FONT_RATIO = 0.022
+
+
+# =========================================================
+# إعدادات وقف الخسارة
+# =========================================================
+
+STOP_LOSS_PERCENTAGE = 0.50
 
 
 # =========================================================
@@ -164,6 +201,7 @@ MIN_FONT_RATIO = 0.022
 GOLD_TEXT_COLOR = (218, 165, 75)
 WHITE_TEXT_COLOR = (242, 239, 230)
 GREEN_TEXT_COLOR = (121, 211, 55)
+RED_TEXT_COLOR = (238, 42, 42)
 
 STROKE_COLOR = (10, 7, 3)
 STROKE_WIDTH_RATIO = 0.0015
@@ -177,7 +215,9 @@ def format_strike(value: str) -> str:
     strike = float(value)
 
     if strike <= 0:
-        raise ValueError("Strike must be greater than zero")
+        raise ValueError(
+            "Strike must be greater than zero"
+        )
 
     if strike.is_integer():
         return str(int(strike))
@@ -189,7 +229,9 @@ def format_premium(value: str) -> str:
     premium = float(value)
 
     if premium <= 0:
-        raise ValueError("Premium must be greater than zero")
+        raise ValueError(
+            "Premium must be greater than zero"
+        )
 
     return f"{premium:.2f}"
 
@@ -212,9 +254,21 @@ def format_profit(value: float) -> str:
     return f"+${rounded_value:,.2f}"
 
 
+def format_loss(value: float) -> str:
+    rounded_value = round(abs(value), 2)
+
+    if rounded_value.is_integer():
+        return f"-${int(rounded_value):,}"
+
+    return f"-${rounded_value:,.2f}"
+
+
 def get_today() -> str:
     now = datetime.now(RIYADH_TIMEZONE)
-    return now.strftime("%d %b %Y")
+
+    return now.strftime(
+        "%d %b %Y"
+    )
 
 
 # =========================================================
@@ -244,11 +298,33 @@ def calculate_highest_result(
 
 
 # =========================================================
+# حساب وقف الخسارة 50%
+# =========================================================
+
+def calculate_stop_loss(
+    entry_price: float,
+) -> float:
+
+    if entry_price <= 0:
+        raise ValueError(
+            "Entry price must be greater than zero"
+        )
+
+    return (
+        entry_price
+        * STOP_LOSS_PERCENTAGE
+    )
+
+
+# =========================================================
 # تحميل الخط
 # =========================================================
 
 def load_font(size: int):
-    requested_size = max(1, int(size))
+    requested_size = max(
+        1,
+        int(size),
+    )
 
     font_paths = [
         (
@@ -298,7 +374,8 @@ def load_font(size: int):
             )
 
     logger.warning(
-        "No TrueType font found. Using Pillow default font."
+        "No TrueType font found. "
+        "Using Pillow default font."
     )
 
     try:
@@ -395,8 +472,13 @@ def fit_font_to_box(
             stroke_width=stroke_width,
         )
 
-        text_width = bounds[2] - bounds[0]
-        text_height = bounds[3] - bounds[1]
+        text_width = (
+            bounds[2] - bounds[0]
+        )
+
+        text_height = (
+            bounds[3] - bounds[1]
+        )
 
         if (
             text_width <= available_width
@@ -422,8 +504,13 @@ def draw_text_in_box(
 
     left, top, right, bottom = box
 
-    center_x = (left + right) // 2
-    center_y = (top + bottom) // 2
+    center_x = (
+        left + right
+    ) // 2
+
+    center_y = (
+        top + bottom
+    ) // 2
 
     font = fit_font_to_box(
         draw=draw,
@@ -493,7 +580,9 @@ def create_signal_card(
         contract = strike
 
     else:
-        raise ValueError("Unsupported signal type")
+        raise ValueError(
+            "Unsupported signal type"
+        )
 
     if not template_path.exists():
         raise FileNotFoundError(
@@ -732,6 +821,81 @@ def create_highest_price_card(
 
 
 # =========================================================
+# إنشاء بطاقة وقف الخسارة
+# =========================================================
+
+def create_stop_loss_card(
+    entry_price: str,
+) -> BytesIO:
+
+    if not STOP_LOSS_TEMPLATE.exists():
+        raise FileNotFoundError(
+            "Template image was not found: "
+            "Stop-Loss.jpg"
+        )
+
+    entry_value = float(entry_price)
+
+    loss_value = calculate_stop_loss(
+        entry_price=entry_value,
+    )
+
+    with Image.open(
+        STOP_LOSS_TEMPLATE
+    ) as template:
+        image = template.convert("RGB")
+
+    draw = ImageDraw.Draw(image)
+    width, height = image.size
+
+    draw_text_in_box(
+        draw=draw,
+        text=f"${entry_price}",
+        box=scale_box(
+            STOP_ENTRY_BOX,
+            width,
+            height,
+        ),
+        card_width=width,
+        maximum_font_ratio=STOP_VALUE_FONT_RATIO,
+        text_color=GOLD_TEXT_COLOR,
+    )
+
+    draw_text_in_box(
+        draw=draw,
+        text=format_loss(loss_value),
+        box=scale_box(
+            STOP_LOSS_BOX,
+            width,
+            height,
+        ),
+        card_width=width,
+        maximum_font_ratio=STOP_VALUE_FONT_RATIO,
+        text_color=RED_TEXT_COLOR,
+    )
+
+    draw_text_in_box(
+        draw=draw,
+        text=get_today(),
+        box=scale_box(
+            STOP_DATE_BOX,
+            width,
+            height,
+        ),
+        card_width=width,
+        maximum_font_ratio=STOP_DATE_FONT_RATIO,
+        text_color=GOLD_TEXT_COLOR,
+    )
+
+    return save_image_to_buffer(
+        image=image,
+        filename=(
+            "quiet_alpha_stop_loss_card.jpg"
+        ),
+    )
+
+
+# =========================================================
 # إرسال صورة إلى القناة
 # =========================================================
 
@@ -820,6 +984,25 @@ async def publish_highest_price_card(
 
 
 # =========================================================
+# إرسال بطاقة وقف الخسارة
+# =========================================================
+
+async def publish_stop_loss_card(
+    context: ContextTypes.DEFAULT_TYPE,
+    entry_price: str,
+) -> None:
+
+    card = create_stop_loss_card(
+        entry_price=entry_price,
+    )
+
+    await send_card_to_channel(
+        context=context,
+        card=card,
+    )
+
+
+# =========================================================
 # أمر /start
 # =========================================================
 
@@ -842,9 +1025,9 @@ async def start_command(
         "<code>/win 3.90 4.90</code>\n\n"
         "🏆 أعلى سعر:\n"
         "<code>/max 3.90 8.40</code>\n\n"
-        "في /max:\n"
-        "الرقم الأول سعر الدخول\n"
-        "الرقم الثاني أعلى سعر"
+        "🛡️ وقف خسارة 50%:\n"
+        "<code>/stop 3.90</code>\n\n"
+        "في أمر /stop اكتبي سعر الدخول فقط."
     )
 
     await update.message.reply_text(
@@ -896,6 +1079,16 @@ async def call_command(
         await update.message.reply_text(
             "❌ الاسترايك وسعر العقد "
             "يجب أن يكونا أرقامًا صحيحة."
+        )
+
+    except FileNotFoundError as error:
+        logger.exception(
+            "CALL template was not found"
+        )
+
+        await update.message.reply_text(
+            "❌ لم أجد قالب CALL.\n"
+            f"{error}"
         )
 
     except Exception as error:
@@ -954,6 +1147,16 @@ async def put_command(
             "يجب أن يكونا أرقامًا صحيحة."
         )
 
+    except FileNotFoundError as error:
+        logger.exception(
+            "PUT template was not found"
+        )
+
+        await update.message.reply_text(
+            "❌ لم أجد قالب PUT.\n"
+            f"{error}"
+        )
+
     except Exception as error:
         logger.exception(
             "Failed to publish PUT card"
@@ -967,7 +1170,6 @@ async def put_command(
 
 # =========================================================
 # أمر /win
-# /win 3.90 4.90
 # =========================================================
 
 async def win_command(
@@ -996,7 +1198,10 @@ async def win_command(
             context.args[1]
         )
 
-        if float(exit_price) <= float(entry_price):
+        if (
+            float(exit_price)
+            <= float(entry_price)
+        ):
             await update.message.reply_text(
                 "❌ السعر المحقق يجب أن يكون "
                 "أعلى من سعر الدخول."
@@ -1032,7 +1237,6 @@ async def win_command(
 
 # =========================================================
 # أمر /max
-# /max 3.90 8.40
 # =========================================================
 
 async def max_command(
@@ -1123,6 +1327,77 @@ async def max_command(
 
 
 # =========================================================
+# أمر /stop
+# /stop 3.90
+# =========================================================
+
+async def stop_command(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+
+    if update.message is None:
+        return
+
+    if len(context.args) != 1:
+        await update.message.reply_text(
+            "❌ الاستخدام الصحيح:\n\n"
+            "/stop 3.90\n\n"
+            "اكتبي سعر الدخول فقط."
+        )
+        return
+
+    try:
+        entry_price = format_premium(
+            context.args[0]
+        )
+
+        loss_value = calculate_stop_loss(
+            entry_price=float(entry_price),
+        )
+
+        await publish_stop_loss_card(
+            context=context,
+            entry_price=entry_price,
+        )
+
+        await update.message.reply_text(
+            "✅ تم إنشاء ونشر بطاقة وقف الخسارة.\n\n"
+            f"🛡️ الوقف: 50%\n"
+            f"🔻 الخسارة: "
+            f"{format_loss(loss_value)}"
+        )
+
+    except (ValueError, TypeError):
+        await update.message.reply_text(
+            "❌ سعر الدخول يجب أن يكون "
+            "رقمًا صحيحًا.\n\n"
+            "مثال:\n"
+            "/stop 3.90"
+        )
+
+    except FileNotFoundError as error:
+        logger.exception(
+            "Stop-loss template was not found"
+        )
+
+        await update.message.reply_text(
+            "❌ لم أجد ملف Stop-Loss.jpg.\n"
+            f"{error}"
+        )
+
+    except Exception as error:
+        logger.exception(
+            "Failed to publish stop-loss card"
+        )
+
+        await update.message.reply_text(
+            "❌ تعذر إنشاء بطاقة وقف الخسارة.\n"
+            f"نوع الخطأ: {type(error).__name__}"
+        )
+
+
+# =========================================================
 # أمر /status
 # =========================================================
 
@@ -1141,6 +1416,7 @@ async def status_command(
         (
             "highest_price_card.jpg"
         ): HIGHEST_PRICE_TEMPLATE.exists(),
+        "Stop-Loss.jpg": STOP_LOSS_TEMPLATE.exists(),
     }
 
     missing_templates = [
@@ -1155,7 +1431,8 @@ async def status_command(
             "✅ قالب CALL موجود.\n"
             "✅ قالب PUT موجود.\n"
             "✅ قالب SUCCESS موجود.\n"
-            "✅ قالب HIGHEST PRICE موجود."
+            "✅ قالب HIGHEST PRICE موجود.\n"
+            "✅ قالب STOP LOSS موجود."
         )
 
     else:
@@ -1165,7 +1442,9 @@ async def status_command(
             + "\n".join(missing_templates)
         )
 
-    await update.message.reply_text(message)
+    await update.message.reply_text(
+        message
+    )
 
 
 # =========================================================
@@ -1227,6 +1506,13 @@ def main() -> None:
         CommandHandler(
             ["max", "highest"],
             max_command,
+        )
+    )
+
+    application.add_handler(
+        CommandHandler(
+            ["stop", "loss"],
+            stop_command,
         )
     )
 
