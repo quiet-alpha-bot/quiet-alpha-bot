@@ -24,6 +24,7 @@ BASE_DIR = Path(__file__).resolve().parent
 CALL_TEMPLATE = BASE_DIR / "call_card.jpg"
 PUT_TEMPLATE = BASE_DIR / "put_card.jpg"
 SUCCESS_TEMPLATE = BASE_DIR / "success_card.jpg"
+HIGHEST_PRICE_TEMPLATE = BASE_DIR / "highest_price_card.jpg"
 
 if not BOT_TOKEN:
     raise ValueError("BOT_TOKEN is missing")
@@ -46,7 +47,6 @@ logger = logging.getLogger("quiet-alpha-bot")
 
 # =========================================================
 # خانات بطاقات CALL وPUT
-#
 # left, top, right, bottom
 # =========================================================
 
@@ -100,6 +100,47 @@ SUCCESS_DATE_BOX = (
 
 
 # =========================================================
+# خانات بطاقة أعلى سعر
+# highest_price_card.jpg = 1536 × 1024
+# =========================================================
+
+HIGHEST_ENTRY_BOX = (
+    0.055,
+    0.755,
+    0.250,
+    0.855,
+)
+
+HIGHEST_PRICE_BOX = (
+    0.275,
+    0.755,
+    0.475,
+    0.855,
+)
+
+HIGHEST_RETURN_BOX = (
+    0.515,
+    0.755,
+    0.715,
+    0.855,
+)
+
+HIGHEST_PROFIT_BOX = (
+    0.755,
+    0.755,
+    0.955,
+    0.855,
+)
+
+HIGHEST_DATE_BOX = (
+    0.105,
+    0.895,
+    0.340,
+    0.975,
+)
+
+
+# =========================================================
 # أحجام الخط
 # =========================================================
 
@@ -110,15 +151,19 @@ DATE_MAX_FONT_RATIO = 0.046
 SUCCESS_PRICE_FONT_RATIO = 0.060
 SUCCESS_DATE_FONT_RATIO = 0.040
 
-MIN_FONT_RATIO = 0.024
+HIGHEST_VALUE_FONT_RATIO = 0.050
+HIGHEST_DATE_FONT_RATIO = 0.036
+
+MIN_FONT_RATIO = 0.022
 
 
 # =========================================================
 # ألوان النص
 # =========================================================
 
-TEXT_COLOR = (218, 165, 75)
-SUCCESS_TEXT_COLOR = (218, 165, 75)
+GOLD_TEXT_COLOR = (218, 165, 75)
+WHITE_TEXT_COLOR = (242, 239, 230)
+GREEN_TEXT_COLOR = (121, 211, 55)
 
 STROKE_COLOR = (10, 7, 3)
 STROKE_WIDTH_RATIO = 0.0015
@@ -132,9 +177,7 @@ def format_strike(value: str) -> str:
     strike = float(value)
 
     if strike <= 0:
-        raise ValueError(
-            "Strike must be greater than zero"
-        )
+        raise ValueError("Strike must be greater than zero")
 
     if strike.is_integer():
         return str(int(strike))
@@ -146,19 +189,58 @@ def format_premium(value: str) -> str:
     premium = float(value)
 
     if premium <= 0:
-        raise ValueError(
-            "Premium must be greater than zero"
-        )
+        raise ValueError("Premium must be greater than zero")
 
     return f"{premium:.2f}"
 
 
+def format_percentage(value: float) -> str:
+    rounded_value = round(value, 1)
+
+    if rounded_value.is_integer():
+        return f"+{int(rounded_value)}%"
+
+    return f"+{rounded_value:.1f}%"
+
+
+def format_profit(value: float) -> str:
+    rounded_value = round(value, 2)
+
+    if rounded_value.is_integer():
+        return f"+${int(rounded_value):,}"
+
+    return f"+${rounded_value:,.2f}"
+
+
 def get_today() -> str:
     now = datetime.now(RIYADH_TIMEZONE)
+    return now.strftime("%d %b %Y")
 
-    return now.strftime(
-        "%d %b %Y"
-    )
+
+# =========================================================
+# حساب أعلى سعر
+# =========================================================
+
+def calculate_highest_result(
+    entry_price: float,
+    highest_price: float,
+) -> tuple[float, float]:
+
+    if highest_price <= entry_price:
+        raise ValueError(
+            "Highest price must be greater than entry price"
+        )
+
+    return_percentage = (
+        (highest_price - entry_price)
+        / entry_price
+    ) * 100
+
+    highest_profit = (
+        highest_price - entry_price
+    ) * 100
+
+    return return_percentage, highest_profit
 
 
 # =========================================================
@@ -166,10 +248,7 @@ def get_today() -> str:
 # =========================================================
 
 def load_font(size: int):
-    requested_size = max(
-        1,
-        int(size),
-    )
+    requested_size = max(1, int(size))
 
     font_paths = [
         (
@@ -219,8 +298,7 @@ def load_font(size: int):
             )
 
     logger.warning(
-        "No TrueType font found. "
-        "Using Pillow default font."
+        "No TrueType font found. Using Pillow default font."
     )
 
     try:
@@ -339,18 +417,13 @@ def draw_text_in_box(
     box: tuple[int, int, int, int],
     card_width: int,
     maximum_font_ratio: float,
-    text_color: tuple[int, int, int] = TEXT_COLOR,
+    text_color: tuple[int, int, int] = GOLD_TEXT_COLOR,
 ) -> None:
 
     left, top, right, bottom = box
 
-    center_x = (
-        left + right
-    ) // 2
-
-    center_y = (
-        top + bottom
-    ) // 2
+    center_x = (left + right) // 2
+    center_y = (top + bottom) // 2
 
     font = fit_font_to_box(
         draw=draw,
@@ -377,6 +450,31 @@ def draw_text_in_box(
 
 
 # =========================================================
+# حفظ الصورة داخل الذاكرة
+# =========================================================
+
+def save_image_to_buffer(
+    image: Image.Image,
+    filename: str,
+) -> BytesIO:
+
+    output = BytesIO()
+    output.name = filename
+
+    image.save(
+        output,
+        format="JPEG",
+        quality=96,
+        optimize=True,
+    )
+
+    output.seek(0)
+    image.close()
+
+    return output
+
+
+# =========================================================
 # إنشاء بطاقة CALL أو PUT
 # =========================================================
 
@@ -395,9 +493,7 @@ def create_signal_card(
         contract = strike
 
     else:
-        raise ValueError(
-            "Unsupported signal type"
-        )
+        raise ValueError("Unsupported signal type")
 
     if not template_path.exists():
         raise FileNotFoundError(
@@ -409,69 +505,54 @@ def create_signal_card(
         image = template.convert("RGB")
 
     draw = ImageDraw.Draw(image)
-
     width, height = image.size
-
-    entry_box = scale_box(
-        ENTRY_BOX,
-        width,
-        height,
-    )
-
-    premium_box = scale_box(
-        PREMIUM_BOX,
-        width,
-        height,
-    )
-
-    date_box = scale_box(
-        DATE_BOX,
-        width,
-        height,
-    )
 
     draw_text_in_box(
         draw=draw,
         text=contract,
-        box=entry_box,
+        box=scale_box(
+            ENTRY_BOX,
+            width,
+            height,
+        ),
         card_width=width,
         maximum_font_ratio=ENTRY_MAX_FONT_RATIO,
+        text_color=GOLD_TEXT_COLOR,
     )
 
     draw_text_in_box(
         draw=draw,
         text=f"${premium}",
-        box=premium_box,
+        box=scale_box(
+            PREMIUM_BOX,
+            width,
+            height,
+        ),
         card_width=width,
         maximum_font_ratio=PREMIUM_MAX_FONT_RATIO,
+        text_color=GOLD_TEXT_COLOR,
     )
 
     draw_text_in_box(
         draw=draw,
         text=get_today(),
-        box=date_box,
+        box=scale_box(
+            DATE_BOX,
+            width,
+            height,
+        ),
         card_width=width,
         maximum_font_ratio=DATE_MAX_FONT_RATIO,
+        text_color=GOLD_TEXT_COLOR,
     )
 
-    output = BytesIO()
-
-    output.name = (
-        f"quiet_alpha_"
-        f"{signal_type.lower()}_card.jpg"
+    return save_image_to_buffer(
+        image=image,
+        filename=(
+            f"quiet_alpha_"
+            f"{signal_type.lower()}_card.jpg"
+        ),
     )
-
-    image.save(
-        output,
-        format="JPEG",
-        quality=96,
-        optimize=True,
-    )
-
-    output.seek(0)
-    image.close()
-
-    return output
 
 
 # =========================================================
@@ -493,68 +574,184 @@ def create_success_card(
         image = template.convert("RGB")
 
     draw = ImageDraw.Draw(image)
-
     width, height = image.size
-
-    success_entry_box = scale_box(
-        SUCCESS_ENTRY_BOX,
-        width,
-        height,
-    )
-
-    success_exit_box = scale_box(
-        SUCCESS_EXIT_BOX,
-        width,
-        height,
-    )
-
-    success_date_box = scale_box(
-        SUCCESS_DATE_BOX,
-        width,
-        height,
-    )
 
     draw_text_in_box(
         draw=draw,
         text=f"${entry_price}",
-        box=success_entry_box,
+        box=scale_box(
+            SUCCESS_ENTRY_BOX,
+            width,
+            height,
+        ),
         card_width=width,
         maximum_font_ratio=SUCCESS_PRICE_FONT_RATIO,
-        text_color=SUCCESS_TEXT_COLOR,
+        text_color=GOLD_TEXT_COLOR,
     )
 
     draw_text_in_box(
         draw=draw,
         text=f"${exit_price}",
-        box=success_exit_box,
+        box=scale_box(
+            SUCCESS_EXIT_BOX,
+            width,
+            height,
+        ),
         card_width=width,
         maximum_font_ratio=SUCCESS_PRICE_FONT_RATIO,
-        text_color=SUCCESS_TEXT_COLOR,
+        text_color=GOLD_TEXT_COLOR,
     )
 
     draw_text_in_box(
         draw=draw,
         text=get_today(),
-        box=success_date_box,
+        box=scale_box(
+            SUCCESS_DATE_BOX,
+            width,
+            height,
+        ),
         card_width=width,
         maximum_font_ratio=SUCCESS_DATE_FONT_RATIO,
-        text_color=SUCCESS_TEXT_COLOR,
+        text_color=GOLD_TEXT_COLOR,
     )
 
-    output = BytesIO()
-    output.name = "quiet_alpha_success_card.jpg"
-
-    image.save(
-        output,
-        format="JPEG",
-        quality=96,
-        optimize=True,
+    return save_image_to_buffer(
+        image=image,
+        filename="quiet_alpha_success_card.jpg",
     )
 
-    output.seek(0)
-    image.close()
 
-    return output
+# =========================================================
+# إنشاء بطاقة أعلى سعر
+# =========================================================
+
+def create_highest_price_card(
+    entry_price: str,
+    highest_price: str,
+) -> BytesIO:
+
+    if not HIGHEST_PRICE_TEMPLATE.exists():
+        raise FileNotFoundError(
+            "Template image was not found: "
+            "highest_price_card.jpg"
+        )
+
+    entry_value = float(entry_price)
+    highest_value = float(highest_price)
+
+    return_percentage, highest_profit = (
+        calculate_highest_result(
+            entry_price=entry_value,
+            highest_price=highest_value,
+        )
+    )
+
+    with Image.open(
+        HIGHEST_PRICE_TEMPLATE
+    ) as template:
+        image = template.convert("RGB")
+
+    draw = ImageDraw.Draw(image)
+    width, height = image.size
+
+    draw_text_in_box(
+        draw=draw,
+        text=f"${entry_price}",
+        box=scale_box(
+            HIGHEST_ENTRY_BOX,
+            width,
+            height,
+        ),
+        card_width=width,
+        maximum_font_ratio=HIGHEST_VALUE_FONT_RATIO,
+        text_color=WHITE_TEXT_COLOR,
+    )
+
+    draw_text_in_box(
+        draw=draw,
+        text=f"${highest_price}",
+        box=scale_box(
+            HIGHEST_PRICE_BOX,
+            width,
+            height,
+        ),
+        card_width=width,
+        maximum_font_ratio=HIGHEST_VALUE_FONT_RATIO,
+        text_color=WHITE_TEXT_COLOR,
+    )
+
+    draw_text_in_box(
+        draw=draw,
+        text=format_percentage(
+            return_percentage
+        ),
+        box=scale_box(
+            HIGHEST_RETURN_BOX,
+            width,
+            height,
+        ),
+        card_width=width,
+        maximum_font_ratio=HIGHEST_VALUE_FONT_RATIO,
+        text_color=GREEN_TEXT_COLOR,
+    )
+
+    draw_text_in_box(
+        draw=draw,
+        text=format_profit(
+            highest_profit
+        ),
+        box=scale_box(
+            HIGHEST_PROFIT_BOX,
+            width,
+            height,
+        ),
+        card_width=width,
+        maximum_font_ratio=HIGHEST_VALUE_FONT_RATIO,
+        text_color=GREEN_TEXT_COLOR,
+    )
+
+    draw_text_in_box(
+        draw=draw,
+        text=get_today(),
+        box=scale_box(
+            HIGHEST_DATE_BOX,
+            width,
+            height,
+        ),
+        card_width=width,
+        maximum_font_ratio=HIGHEST_DATE_FONT_RATIO,
+        text_color=GOLD_TEXT_COLOR,
+    )
+
+    return save_image_to_buffer(
+        image=image,
+        filename=(
+            "quiet_alpha_highest_price_card.jpg"
+        ),
+    )
+
+
+# =========================================================
+# إرسال صورة إلى القناة
+# =========================================================
+
+async def send_card_to_channel(
+    context: ContextTypes.DEFAULT_TYPE,
+    card: BytesIO,
+) -> None:
+
+    try:
+        await context.bot.send_photo(
+            chat_id=SIGNAL_CHAT_ID,
+            photo=card,
+            connect_timeout=30,
+            read_timeout=90,
+            write_timeout=90,
+            pool_timeout=30,
+        )
+
+    finally:
+        card.close()
 
 
 # =========================================================
@@ -574,18 +771,10 @@ async def publish_signal(
         premium=premium,
     )
 
-    try:
-        await context.bot.send_photo(
-            chat_id=SIGNAL_CHAT_ID,
-            photo=card,
-            connect_timeout=30,
-            read_timeout=90,
-            write_timeout=90,
-            pool_timeout=30,
-        )
-
-    finally:
-        card.close()
+    await send_card_to_channel(
+        context=context,
+        card=card,
+    )
 
 
 # =========================================================
@@ -603,18 +792,31 @@ async def publish_success_card(
         exit_price=exit_price,
     )
 
-    try:
-        await context.bot.send_photo(
-            chat_id=SIGNAL_CHAT_ID,
-            photo=card,
-            connect_timeout=30,
-            read_timeout=90,
-            write_timeout=90,
-            pool_timeout=30,
-        )
+    await send_card_to_channel(
+        context=context,
+        card=card,
+    )
 
-    finally:
-        card.close()
+
+# =========================================================
+# إرسال بطاقة أعلى سعر
+# =========================================================
+
+async def publish_highest_price_card(
+    context: ContextTypes.DEFAULT_TYPE,
+    entry_price: str,
+    highest_price: str,
+) -> None:
+
+    card = create_highest_price_card(
+        entry_price=entry_price,
+        highest_price=highest_price,
+    )
+
+    await send_card_to_channel(
+        context=context,
+        card=card,
+    )
 
 
 # =========================================================
@@ -632,15 +834,17 @@ async def start_command(
     message = (
         "🦋 <b>Quiet Alpha Bot</b>\n\n"
         "البوت جاهز لإنشاء بطاقات الصفقات.\n\n"
-        "🟢 لإرسال CALL:\n"
+        "🟢 CALL:\n"
         "<code>/c 7555 3.90</code>\n\n"
-        "🔴 لإرسال PUT:\n"
+        "🔴 PUT:\n"
         "<code>/p 7555 3.90</code>\n\n"
-        "✅ لإرسال صفقة ناجحة:\n"
+        "✅ صفقة ناجحة:\n"
         "<code>/win 3.90 4.90</code>\n\n"
-        "في أمر /win:\n"
+        "🏆 أعلى سعر:\n"
+        "<code>/max 3.90 8.40</code>\n\n"
+        "في /max:\n"
         "الرقم الأول سعر الدخول\n"
-        "الرقم الثاني السعر المحقق"
+        "الرقم الثاني أعلى سعر"
     )
 
     await update.message.reply_text(
@@ -690,20 +894,8 @@ async def call_command(
 
     except (ValueError, TypeError):
         await update.message.reply_text(
-            "❌ الاسترايك وسعر العقد يجب "
-            "أن يكونا أرقامًا صحيحة.\n\n"
-            "مثال:\n"
-            "/c 7555 3.90"
-        )
-
-    except FileNotFoundError as error:
-        logger.exception(
-            "CALL template was not found"
-        )
-
-        await update.message.reply_text(
-            "❌ لم أجد ملف قالب CALL.\n"
-            f"{error}"
+            "❌ الاسترايك وسعر العقد "
+            "يجب أن يكونا أرقامًا صحيحة."
         )
 
     except Exception as error:
@@ -758,20 +950,8 @@ async def put_command(
 
     except (ValueError, TypeError):
         await update.message.reply_text(
-            "❌ الاسترايك وسعر العقد يجب "
-            "أن يكونا أرقامًا صحيحة.\n\n"
-            "مثال:\n"
-            "/p 7555 3.90"
-        )
-
-    except FileNotFoundError as error:
-        logger.exception(
-            "PUT template was not found"
-        )
-
-        await update.message.reply_text(
-            "❌ لم أجد ملف قالب PUT.\n"
-            f"{error}"
+            "❌ الاسترايك وسعر العقد "
+            "يجب أن يكونا أرقامًا صحيحة."
         )
 
     except Exception as error:
@@ -836,19 +1016,7 @@ async def win_command(
     except (ValueError, TypeError):
         await update.message.reply_text(
             "❌ سعر الدخول والسعر المحقق "
-            "يجب أن يكونا أرقامًا صحيحة.\n\n"
-            "مثال:\n"
-            "/win 3.90 4.90"
-        )
-
-    except FileNotFoundError as error:
-        logger.exception(
-            "Success template was not found"
-        )
-
-        await update.message.reply_text(
-            "❌ لم أجد ملف success_card.jpg.\n"
-            f"{error}"
+            "يجب أن يكونا أرقامًا صحيحة."
         )
 
     except Exception as error:
@@ -858,6 +1026,98 @@ async def win_command(
 
         await update.message.reply_text(
             "❌ تعذر إنشاء بطاقة الصفقة الناجحة.\n"
+            f"نوع الخطأ: {type(error).__name__}"
+        )
+
+
+# =========================================================
+# أمر /max
+# /max 3.90 8.40
+# =========================================================
+
+async def max_command(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+
+    if update.message is None:
+        return
+
+    if len(context.args) != 2:
+        await update.message.reply_text(
+            "❌ الاستخدام الصحيح:\n\n"
+            "/max 3.90 8.40\n\n"
+            "الرقم الأول: سعر الدخول\n"
+            "الرقم الثاني: أعلى سعر"
+        )
+        return
+
+    try:
+        entry_price = format_premium(
+            context.args[0]
+        )
+
+        highest_price = format_premium(
+            context.args[1]
+        )
+
+        if (
+            float(highest_price)
+            <= float(entry_price)
+        ):
+            await update.message.reply_text(
+                "❌ أعلى سعر يجب أن يكون "
+                "أكبر من سعر الدخول."
+            )
+            return
+
+        await publish_highest_price_card(
+            context=context,
+            entry_price=entry_price,
+            highest_price=highest_price,
+        )
+
+        return_percentage, highest_profit = (
+            calculate_highest_result(
+                entry_price=float(entry_price),
+                highest_price=float(highest_price),
+            )
+        )
+
+        await update.message.reply_text(
+            "✅ تم إنشاء ونشر بطاقة أعلى سعر.\n\n"
+            f"📈 العائد: "
+            f"{format_percentage(return_percentage)}\n"
+            f"💰 أعلى ربح: "
+            f"{format_profit(highest_profit)}"
+        )
+
+    except (ValueError, TypeError):
+        await update.message.reply_text(
+            "❌ سعر الدخول وأعلى سعر "
+            "يجب أن يكونا أرقامًا صحيحة.\n\n"
+            "مثال:\n"
+            "/max 3.90 8.40"
+        )
+
+    except FileNotFoundError as error:
+        logger.exception(
+            "Highest-price template was not found"
+        )
+
+        await update.message.reply_text(
+            "❌ لم أجد ملف "
+            "highest_price_card.jpg.\n"
+            f"{error}"
+        )
+
+    except Exception as error:
+        logger.exception(
+            "Failed to publish highest-price card"
+        )
+
+        await update.message.reply_text(
+            "❌ تعذر إنشاء بطاقة أعلى سعر.\n"
             f"نوع الخطأ: {type(error).__name__}"
         )
 
@@ -878,6 +1138,9 @@ async def status_command(
         "call_card.jpg": CALL_TEMPLATE.exists(),
         "put_card.jpg": PUT_TEMPLATE.exists(),
         "success_card.jpg": SUCCESS_TEMPLATE.exists(),
+        (
+            "highest_price_card.jpg"
+        ): HIGHEST_PRICE_TEMPLATE.exists(),
     }
 
     missing_templates = [
@@ -891,7 +1154,8 @@ async def status_command(
             "🟢 البوت يعمل.\n"
             "✅ قالب CALL موجود.\n"
             "✅ قالب PUT موجود.\n"
-            "✅ قالب SUCCESS موجود."
+            "✅ قالب SUCCESS موجود.\n"
+            "✅ قالب HIGHEST PRICE موجود."
         )
 
     else:
@@ -956,6 +1220,13 @@ def main() -> None:
         CommandHandler(
             ["win", "success"],
             win_command,
+        )
+    )
+
+    application.add_handler(
+        CommandHandler(
+            ["max", "highest"],
+            max_command,
         )
     )
 
