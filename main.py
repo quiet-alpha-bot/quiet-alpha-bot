@@ -27,6 +27,7 @@ SUCCESS_TEMPLATE = BASE_DIR / "success_card.jpg"
 HIGHEST_PRICE_TEMPLATE = BASE_DIR / "highest_price_card.jpg"
 STOP_LOSS_TEMPLATE = BASE_DIR / "Stop-Loss.jpg"
 WEEKLY_TEMPLATE = BASE_DIR / "weekly_results_card.jpg"
+MONTHLY_TEMPLATE = BASE_DIR / "monthly_results_card.jpg"
 
 if not BOT_TOKEN:
     raise ValueError("BOT_TOKEN is missing")
@@ -169,85 +170,87 @@ STOP_DATE_BOX = (
 
 
 # =========================================================
-# خانات بطاقة الأداء الأسبوعي
-# weekly_results_card.jpg = 720 × 1280
+# خانات بطاقتي الأداء الأسبوعي والشهري
+#
+# Weekly  = 720 × 971 تقريبًا
+# Monthly = 720 × 967 تقريبًا
 # =========================================================
 
-WEEKLY_TOTAL_TRADES_BOX = (
+PERFORMANCE_TOTAL_TRADES_BOX = (
     0.035,
-    0.365,
+    0.355,
     0.280,
-    0.475,
+    0.455,
 )
 
-WEEKLY_WINNING_TRADES_BOX = (
+PERFORMANCE_WINNING_TRADES_BOX = (
     0.290,
-    0.365,
+    0.355,
     0.500,
-    0.475,
+    0.455,
 )
 
-WEEKLY_LOSING_TRADES_BOX = (
+PERFORMANCE_LOSING_TRADES_BOX = (
     0.505,
-    0.365,
+    0.355,
     0.720,
-    0.475,
+    0.455,
 )
 
-WEEKLY_WIN_RATE_BOX = (
+PERFORMANCE_WIN_RATE_BOX = (
     0.725,
-    0.365,
+    0.355,
     0.965,
-    0.475,
+    0.455,
 )
 
-WEEKLY_GROSS_PROFIT_BOX = (
+PERFORMANCE_GROSS_PROFIT_BOX = (
     0.035,
-    0.500,
+    0.525,
     0.280,
-    0.615,
+    0.625,
 )
 
-WEEKLY_GROSS_LOSS_BOX = (
+PERFORMANCE_GROSS_LOSS_BOX = (
     0.290,
+    0.525,
     0.500,
-    0.500,
-    0.615,
+    0.625,
 )
 
-WEEKLY_NET_PROFIT_BOX = (
+PERFORMANCE_NET_PROFIT_BOX = (
     0.505,
-    0.500,
+    0.525,
     0.720,
-    0.615,
+    0.625,
 )
 
-WEEKLY_SAR_PROFIT_BOX = (
+PERFORMANCE_SAR_PROFIT_BOX = (
     0.725,
-    0.500,
+    0.525,
     0.965,
-    0.615,
+    0.625,
 )
 
-WEEKLY_BEST_TRADE_BOX = (
-    0.055,
-    0.660,
+PERFORMANCE_BEST_TRADE_BOX = (
+    0.120,
+    0.695,
     0.485,
-    0.755,
+    0.785,
 )
 
-WEEKLY_WORST_TRADE_BOX = (
-    0.515,
-    0.660,
-    0.950,
-    0.755,
+PERFORMANCE_WORST_TRADE_BOX = (
+    0.560,
+    0.695,
+    0.940,
+    0.785,
 )
 
-WEEKLY_DATE_RANGE_BOX = (
+PERFORMANCE_DATE_RANGE_BOX = (
     0.255,
-    0.835,
+    0.915,
     0.750,
-    0.895,
+    0.970,
 )
 
 
@@ -268,10 +271,10 @@ HIGHEST_DATE_FONT_RATIO = 0.036
 STOP_VALUE_FONT_RATIO = 0.060
 STOP_DATE_FONT_RATIO = 0.043
 
-WEEKLY_NUMBER_FONT_RATIO = 0.055
-WEEKLY_MONEY_FONT_RATIO = 0.043
-WEEKLY_TRADE_FONT_RATIO = 0.040
-WEEKLY_DATE_FONT_RATIO = 0.030
+PERFORMANCE_NUMBER_FONT_RATIO = 0.052
+PERFORMANCE_MONEY_FONT_RATIO = 0.037
+PERFORMANCE_TRADE_FONT_RATIO = 0.037
+PERFORMANCE_DATE_FONT_RATIO = 0.028
 
 MIN_FONT_RATIO = 0.022
 
@@ -362,13 +365,24 @@ def format_loss(value: float) -> str:
     return f"-${rounded_value:,.2f}"
 
 
-def format_sar(value: float) -> str:
+def format_sar(
+    value: float,
+    include_sign: bool = False,
+) -> str:
     rounded_value = round(abs(value), 2)
 
     if rounded_value.is_integer():
-        return f"{int(rounded_value):,} SAR"
+        value_text = f"{int(rounded_value):,} SAR"
+    else:
+        value_text = f"{rounded_value:,.2f} SAR"
 
-    return f"{rounded_value:,.2f} SAR"
+    if not include_sign:
+        return value_text
+
+    if value < 0:
+        return f"-{value_text}"
+
+    return value_text
 
 
 def get_today() -> str:
@@ -394,6 +408,37 @@ def get_week_range() -> str:
         f"{week_start.strftime('%d %b %Y')}"
         f" - "
         f"{week_end.strftime('%d %b %Y')}"
+    )
+
+
+def get_month_range() -> str:
+    now = datetime.now(RIYADH_TIMEZONE)
+
+    month_start = now.replace(
+        day=1
+    )
+
+    if now.month == 12:
+        next_month = now.replace(
+            year=now.year + 1,
+            month=1,
+            day=1,
+        )
+    else:
+        next_month = now.replace(
+            month=now.month + 1,
+            day=1,
+        )
+
+    month_end = (
+        next_month
+        - timedelta(days=1)
+    )
+
+    return (
+        f"{month_start.strftime('%d %b %Y')}"
+        f" - "
+        f"{month_end.strftime('%d %b %Y')}"
     )
 
 
@@ -575,7 +620,7 @@ def fit_font_to_box(
     )
 
     minimum_size = max(
-        18,
+        16,
         int(card_width * MIN_FONT_RATIO),
     )
 
@@ -1022,10 +1067,13 @@ def create_stop_loss_card(
 
 
 # =========================================================
-# إنشاء بطاقة الأداء الأسبوعي
+# إنشاء بطاقة أداء أسبوعية أو شهرية
 # =========================================================
 
-def create_weekly_card(
+def create_performance_card(
+    template_path: Path,
+    filename: str,
+    date_range: str,
     total_trades: int,
     winning_trades: int,
     losing_trades: int,
@@ -1035,10 +1083,10 @@ def create_weekly_card(
     worst_trade: float,
 ) -> BytesIO:
 
-    if not WEEKLY_TEMPLATE.exists():
+    if not template_path.exists():
         raise FileNotFoundError(
-            "Template image was not found: "
-            "weekly_results_card.jpg"
+            f"Template image was not found: "
+            f"{template_path.name}"
         )
 
     if total_trades <= 0:
@@ -1086,192 +1134,189 @@ def create_weekly_card(
         * USD_TO_SAR
     )
 
+    if net_profit >= 0:
+        net_text = format_profit(
+            net_profit
+        )
+
+        sar_text = format_sar(
+            net_profit_sar
+        )
+
+        net_color = GREEN_TEXT_COLOR
+
+    else:
+        net_text = format_loss(
+            net_profit
+        )
+
+        sar_text = format_sar(
+            net_profit_sar,
+            include_sign=True,
+        )
+
+        net_color = RED_TEXT_COLOR
+
     with Image.open(
-        WEEKLY_TEMPLATE
+        template_path
     ) as template:
         image = template.convert("RGB")
 
     draw = ImageDraw.Draw(image)
     width, height = image.size
 
-    draw_text_in_box(
-        draw=draw,
-        text=str(total_trades),
-        box=scale_box(
-            WEEKLY_TOTAL_TRADES_BOX,
-            width,
-            height,
+    values = [
+        (
+            str(total_trades),
+            PERFORMANCE_TOTAL_TRADES_BOX,
+            PERFORMANCE_NUMBER_FONT_RATIO,
+            GOLD_TEXT_COLOR,
         ),
-        card_width=width,
-        maximum_font_ratio=(
-            WEEKLY_NUMBER_FONT_RATIO
+        (
+            str(winning_trades),
+            PERFORMANCE_WINNING_TRADES_BOX,
+            PERFORMANCE_NUMBER_FONT_RATIO,
+            GREEN_TEXT_COLOR,
         ),
-        text_color=GOLD_TEXT_COLOR,
-    )
+        (
+            str(losing_trades),
+            PERFORMANCE_LOSING_TRADES_BOX,
+            PERFORMANCE_NUMBER_FONT_RATIO,
+            RED_TEXT_COLOR,
+        ),
+        (
+            format_win_rate(win_rate),
+            PERFORMANCE_WIN_RATE_BOX,
+            PERFORMANCE_NUMBER_FONT_RATIO,
+            GOLD_TEXT_COLOR,
+        ),
+        (
+            format_profit(gross_profit),
+            PERFORMANCE_GROSS_PROFIT_BOX,
+            PERFORMANCE_MONEY_FONT_RATIO,
+            GREEN_TEXT_COLOR,
+        ),
+        (
+            format_loss(gross_loss),
+            PERFORMANCE_GROSS_LOSS_BOX,
+            PERFORMANCE_MONEY_FONT_RATIO,
+            RED_TEXT_COLOR,
+        ),
+        (
+            net_text,
+            PERFORMANCE_NET_PROFIT_BOX,
+            PERFORMANCE_MONEY_FONT_RATIO,
+            net_color,
+        ),
+        (
+            sar_text,
+            PERFORMANCE_SAR_PROFIT_BOX,
+            PERFORMANCE_MONEY_FONT_RATIO,
+            net_color,
+        ),
+        (
+            format_profit(best_trade),
+            PERFORMANCE_BEST_TRADE_BOX,
+            PERFORMANCE_TRADE_FONT_RATIO,
+            GREEN_TEXT_COLOR,
+        ),
+        (
+            format_loss(worst_trade),
+            PERFORMANCE_WORST_TRADE_BOX,
+            PERFORMANCE_TRADE_FONT_RATIO,
+            RED_TEXT_COLOR,
+        ),
+        (
+            date_range,
+            PERFORMANCE_DATE_RANGE_BOX,
+            PERFORMANCE_DATE_FONT_RATIO,
+            GOLD_TEXT_COLOR,
+        ),
+    ]
 
-    draw_text_in_box(
-        draw=draw,
-        text=str(winning_trades),
-        box=scale_box(
-            WEEKLY_WINNING_TRADES_BOX,
-            width,
-            height,
-        ),
-        card_width=width,
-        maximum_font_ratio=(
-            WEEKLY_NUMBER_FONT_RATIO
-        ),
-        text_color=GREEN_TEXT_COLOR,
-    )
+    for (
+        text,
+        proportional_box,
+        font_ratio,
+        text_color,
+    ) in values:
 
-    draw_text_in_box(
-        draw=draw,
-        text=str(losing_trades),
-        box=scale_box(
-            WEEKLY_LOSING_TRADES_BOX,
-            width,
-            height,
-        ),
-        card_width=width,
-        maximum_font_ratio=(
-            WEEKLY_NUMBER_FONT_RATIO
-        ),
-        text_color=RED_TEXT_COLOR,
-    )
-
-    draw_text_in_box(
-        draw=draw,
-        text=format_win_rate(win_rate),
-        box=scale_box(
-            WEEKLY_WIN_RATE_BOX,
-            width,
-            height,
-        ),
-        card_width=width,
-        maximum_font_ratio=(
-            WEEKLY_NUMBER_FONT_RATIO
-        ),
-        text_color=GOLD_TEXT_COLOR,
-    )
-
-    draw_text_in_box(
-        draw=draw,
-        text=format_profit(gross_profit),
-        box=scale_box(
-            WEEKLY_GROSS_PROFIT_BOX,
-            width,
-            height,
-        ),
-        card_width=width,
-        maximum_font_ratio=(
-            WEEKLY_MONEY_FONT_RATIO
-        ),
-        text_color=GREEN_TEXT_COLOR,
-    )
-
-    draw_text_in_box(
-        draw=draw,
-        text=format_loss(gross_loss),
-        box=scale_box(
-            WEEKLY_GROSS_LOSS_BOX,
-            width,
-            height,
-        ),
-        card_width=width,
-        maximum_font_ratio=(
-            WEEKLY_MONEY_FONT_RATIO
-        ),
-        text_color=RED_TEXT_COLOR,
-    )
-
-    if net_profit >= 0:
-        net_text = format_profit(net_profit)
-        net_color = GREEN_TEXT_COLOR
-
-    else:
-        net_text = format_loss(net_profit)
-        net_color = RED_TEXT_COLOR
-
-    draw_text_in_box(
-        draw=draw,
-        text=net_text,
-        box=scale_box(
-            WEEKLY_NET_PROFIT_BOX,
-            width,
-            height,
-        ),
-        card_width=width,
-        maximum_font_ratio=(
-            WEEKLY_MONEY_FONT_RATIO
-        ),
-        text_color=net_color,
-    )
-
-    draw_text_in_box(
-        draw=draw,
-        text=format_sar(net_profit_sar),
-        box=scale_box(
-            WEEKLY_SAR_PROFIT_BOX,
-            width,
-            height,
-        ),
-        card_width=width,
-        maximum_font_ratio=(
-            WEEKLY_MONEY_FONT_RATIO
-        ),
-        text_color=net_color,
-    )
-
-    draw_text_in_box(
-        draw=draw,
-        text=format_profit(best_trade),
-        box=scale_box(
-            WEEKLY_BEST_TRADE_BOX,
-            width,
-            height,
-        ),
-        card_width=width,
-        maximum_font_ratio=(
-            WEEKLY_TRADE_FONT_RATIO
-        ),
-        text_color=GREEN_TEXT_COLOR,
-    )
-
-    draw_text_in_box(
-        draw=draw,
-        text=format_loss(worst_trade),
-        box=scale_box(
-            WEEKLY_WORST_TRADE_BOX,
-            width,
-            height,
-        ),
-        card_width=width,
-        maximum_font_ratio=(
-            WEEKLY_TRADE_FONT_RATIO
-        ),
-        text_color=RED_TEXT_COLOR,
-    )
-
-    draw_text_in_box(
-        draw=draw,
-        text=get_week_range(),
-        box=scale_box(
-            WEEKLY_DATE_RANGE_BOX,
-            width,
-            height,
-        ),
-        card_width=width,
-        maximum_font_ratio=(
-            WEEKLY_DATE_FONT_RATIO
-        ),
-        text_color=GOLD_TEXT_COLOR,
-    )
+        draw_text_in_box(
+            draw=draw,
+            text=text,
+            box=scale_box(
+                proportional_box,
+                width,
+                height,
+            ),
+            card_width=width,
+            maximum_font_ratio=font_ratio,
+            text_color=text_color,
+        )
 
     return save_image_to_buffer(
         image=image,
+        filename=filename,
+    )
+
+
+# =========================================================
+# إنشاء بطاقة الأداء الأسبوعي
+# =========================================================
+
+def create_weekly_card(
+    total_trades: int,
+    winning_trades: int,
+    losing_trades: int,
+    gross_profit: float,
+    gross_loss: float,
+    best_trade: float,
+    worst_trade: float,
+) -> BytesIO:
+
+    return create_performance_card(
+        template_path=WEEKLY_TEMPLATE,
         filename=(
             "quiet_alpha_weekly_results_card.jpg"
         ),
+        date_range=get_week_range(),
+        total_trades=total_trades,
+        winning_trades=winning_trades,
+        losing_trades=losing_trades,
+        gross_profit=gross_profit,
+        gross_loss=gross_loss,
+        best_trade=best_trade,
+        worst_trade=worst_trade,
+    )
+
+
+# =========================================================
+# إنشاء بطاقة الأداء الشهري
+# =========================================================
+
+def create_monthly_card(
+    total_trades: int,
+    winning_trades: int,
+    losing_trades: int,
+    gross_profit: float,
+    gross_loss: float,
+    best_trade: float,
+    worst_trade: float,
+) -> BytesIO:
+
+    return create_performance_card(
+        template_path=MONTHLY_TEMPLATE,
+        filename=(
+            "quiet_alpha_monthly_results_card.jpg"
+        ),
+        date_range=get_month_range(),
+        total_trades=total_trades,
+        winning_trades=winning_trades,
+        losing_trades=losing_trades,
+        gross_profit=gross_profit,
+        gross_loss=gross_loss,
+        best_trade=best_trade,
+        worst_trade=worst_trade,
     )
 
 
@@ -1414,6 +1459,37 @@ async def publish_weekly_card(
 
 
 # =========================================================
+# إرسال بطاقة الأداء الشهري
+# =========================================================
+
+async def publish_monthly_card(
+    context: ContextTypes.DEFAULT_TYPE,
+    total_trades: int,
+    winning_trades: int,
+    losing_trades: int,
+    gross_profit: float,
+    gross_loss: float,
+    best_trade: float,
+    worst_trade: float,
+) -> None:
+
+    card = create_monthly_card(
+        total_trades=total_trades,
+        winning_trades=winning_trades,
+        losing_trades=losing_trades,
+        gross_profit=gross_profit,
+        gross_loss=gross_loss,
+        best_trade=best_trade,
+        worst_trade=worst_trade,
+    )
+
+    await send_card_to_channel(
+        context=context,
+        card=card,
+    )
+
+
+# =========================================================
 # أمر /start
 # =========================================================
 
@@ -1428,18 +1504,27 @@ async def start_command(
     message = (
         "🦋 <b>Quiet Alpha Bot</b>\n\n"
         "البوت جاهز لإنشاء بطاقات الصفقات.\n\n"
+
         "🟢 CALL:\n"
         "<code>/c 7555 3.90</code>\n\n"
+
         "🔴 PUT:\n"
         "<code>/p 7555 3.90</code>\n\n"
+
         "✅ صفقة ناجحة:\n"
         "<code>/win 3.90 4.90</code>\n\n"
+
         "🏆 أعلى سعر:\n"
         "<code>/max 3.90 8.40</code>\n\n"
+
         "🛡️ وقف خسارة 50%:\n"
         "<code>/stop 3.90</code>\n\n"
+
         "📊 الأداء الأسبوعي:\n"
-        "<code>/weekly 24 18 6 2480 620 680 260</code>"
+        "<code>/weekly 30 20 10 2480 620 680 260</code>\n\n"
+
+        "📅 الأداء الشهري:\n"
+        "<code>/monthly 30 20 10 2480 620 680 260</code>"
     )
 
     await update.message.reply_text(
@@ -1636,6 +1721,16 @@ async def win_command(
             "يجب أن يكونا أرقامًا صحيحة."
         )
 
+    except FileNotFoundError as error:
+        logger.exception(
+            "Success template was not found"
+        )
+
+        await update.message.reply_text(
+            "❌ لم أجد ملف success_card.jpg.\n"
+            f"{error}"
+        )
+
     except Exception as error:
         logger.exception(
             "Failed to publish success card"
@@ -1809,9 +1904,134 @@ async def stop_command(
 
 
 # =========================================================
+# قراءة بيانات بطاقة الأداء
+# =========================================================
+
+def parse_performance_args(
+    args: list[str],
+) -> tuple[int, int, int, float, float, float, float]:
+
+    if len(args) != 7:
+        raise ValueError(
+            "Seven values are required"
+        )
+
+    total_trades = int(
+        args[0]
+    )
+
+    winning_trades = int(
+        args[1]
+    )
+
+    losing_trades = int(
+        args[2]
+    )
+
+    gross_profit = float(
+        args[3]
+    )
+
+    gross_loss = float(
+        args[4]
+    )
+
+    best_trade = float(
+        args[5]
+    )
+
+    worst_trade = float(
+        args[6]
+    )
+
+    if total_trades <= 0:
+        raise ValueError(
+            "Total trades must be greater than zero"
+        )
+
+    if (
+        winning_trades
+        + losing_trades
+        != total_trades
+    ):
+        raise ValueError(
+            "Winning plus losing must equal total"
+        )
+
+    if (
+        gross_profit < 0
+        or gross_loss < 0
+        or best_trade < 0
+        or worst_trade < 0
+    ):
+        raise ValueError(
+            "Financial values cannot be negative"
+        )
+
+    return (
+        total_trades,
+        winning_trades,
+        losing_trades,
+        gross_profit,
+        gross_loss,
+        best_trade,
+        worst_trade,
+    )
+
+
+# =========================================================
+# إرسال ملخص الأداء بعد نشر البطاقة
+# =========================================================
+
+async def send_performance_summary(
+    update: Update,
+    title: str,
+    total_trades: int,
+    winning_trades: int,
+    gross_profit: float,
+    gross_loss: float,
+) -> None:
+
+    if update.message is None:
+        return
+
+    win_rate = (
+        winning_trades
+        / total_trades
+    ) * 100
+
+    net_profit = (
+        gross_profit
+        - gross_loss
+    )
+
+    if net_profit >= 0:
+        net_result = format_profit(
+            net_profit
+        )
+    else:
+        net_result = format_loss(
+            net_profit
+        )
+
+    sar_result = format_sar(
+        net_profit * USD_TO_SAR,
+        include_sign=(net_profit < 0),
+    )
+
+    await update.message.reply_text(
+        f"✅ تم إنشاء ونشر {title}.\n\n"
+        f"📊 نسبة النجاح: "
+        f"{format_win_rate(win_rate)}\n"
+        f"💰 صافي النتيجة: "
+        f"{net_result}\n"
+        f"🇸🇦 بالريال: "
+        f"{sar_result}"
+    )
+
+
+# =========================================================
 # أمر /weekly
-#
-# /weekly 24 18 6 2480 620 680 260
 # =========================================================
 
 async def weekly_command(
@@ -1825,7 +2045,7 @@ async def weekly_command(
     if len(context.args) != 7:
         await update.message.reply_text(
             "❌ الاستخدام الصحيح:\n\n"
-            "/weekly 24 18 6 2480 620 680 260\n\n"
+            "/weekly 30 20 10 2480 620 680 260\n\n"
             "الترتيب:\n"
             "1️⃣ إجمالي الصفقات\n"
             "2️⃣ الصفقات الرابحة\n"
@@ -1838,32 +2058,16 @@ async def weekly_command(
         return
 
     try:
-        total_trades = int(
-            context.args[0]
-        )
-
-        winning_trades = int(
-            context.args[1]
-        )
-
-        losing_trades = int(
-            context.args[2]
-        )
-
-        gross_profit = float(
-            context.args[3]
-        )
-
-        gross_loss = float(
-            context.args[4]
-        )
-
-        best_trade = float(
-            context.args[5]
-        )
-
-        worst_trade = float(
-            context.args[6]
+        (
+            total_trades,
+            winning_trades,
+            losing_trades,
+            gross_profit,
+            gross_loss,
+            best_trade,
+            worst_trade,
+        ) = parse_performance_args(
+            context.args
         )
 
         await publish_weekly_card(
@@ -1877,39 +2081,26 @@ async def weekly_command(
             worst_trade=worst_trade,
         )
 
-        win_rate = (
-            winning_trades
-            / total_trades
-        ) * 100
-
-        net_profit = (
-            gross_profit
-            - gross_loss
+        await send_performance_summary(
+            update=update,
+            title="الإحصائية الأسبوعية",
+            total_trades=total_trades,
+            winning_trades=winning_trades,
+            gross_profit=gross_profit,
+            gross_loss=gross_loss,
         )
 
-        net_result = (
-            format_profit(net_profit)
-            if net_profit >= 0
-            else format_loss(net_profit)
-        )
-
-        await update.message.reply_text(
-            "✅ تم إنشاء ونشر الإحصائية الأسبوعية.\n\n"
-            f"📊 نسبة النجاح: "
-            f"{format_win_rate(win_rate)}\n"
-            f"💰 صافي النتيجة: "
-            f"{net_result}\n"
-            f"🇸🇦 بالريال: "
-            f"{format_sar(net_profit * USD_TO_SAR)}"
-        )
-
-    except (ValueError, TypeError, ZeroDivisionError):
+    except (
+        ValueError,
+        TypeError,
+        ZeroDivisionError,
+    ):
         await update.message.reply_text(
             "❌ البيانات غير صحيحة.\n\n"
-            "تأكدي أن عدد الرابحة + الخاسرة "
+            "تأكدي أن الرابحة + الخاسرة "
             "يساوي إجمالي الصفقات.\n\n"
             "مثال:\n"
-            "/weekly 24 18 6 2480 620 680 260"
+            "/weekly 30 20 10 2480 620 680 260"
         )
 
     except FileNotFoundError as error:
@@ -1935,6 +2126,101 @@ async def weekly_command(
 
 
 # =========================================================
+# أمر /monthly
+# =========================================================
+
+async def monthly_command(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+
+    if update.message is None:
+        return
+
+    if len(context.args) != 7:
+        await update.message.reply_text(
+            "❌ الاستخدام الصحيح:\n\n"
+            "/monthly 30 20 10 2480 620 680 260\n\n"
+            "الترتيب:\n"
+            "1️⃣ إجمالي الصفقات\n"
+            "2️⃣ الصفقات الرابحة\n"
+            "3️⃣ الصفقات الخاسرة\n"
+            "4️⃣ إجمالي الربح\n"
+            "5️⃣ إجمالي الخسارة\n"
+            "6️⃣ أفضل صفقة\n"
+            "7️⃣ أسوأ صفقة"
+        )
+        return
+
+    try:
+        (
+            total_trades,
+            winning_trades,
+            losing_trades,
+            gross_profit,
+            gross_loss,
+            best_trade,
+            worst_trade,
+        ) = parse_performance_args(
+            context.args
+        )
+
+        await publish_monthly_card(
+            context=context,
+            total_trades=total_trades,
+            winning_trades=winning_trades,
+            losing_trades=losing_trades,
+            gross_profit=gross_profit,
+            gross_loss=gross_loss,
+            best_trade=best_trade,
+            worst_trade=worst_trade,
+        )
+
+        await send_performance_summary(
+            update=update,
+            title="الإحصائية الشهرية",
+            total_trades=total_trades,
+            winning_trades=winning_trades,
+            gross_profit=gross_profit,
+            gross_loss=gross_loss,
+        )
+
+    except (
+        ValueError,
+        TypeError,
+        ZeroDivisionError,
+    ):
+        await update.message.reply_text(
+            "❌ البيانات غير صحيحة.\n\n"
+            "تأكدي أن الرابحة + الخاسرة "
+            "يساوي إجمالي الصفقات.\n\n"
+            "مثال:\n"
+            "/monthly 30 20 10 2480 620 680 260"
+        )
+
+    except FileNotFoundError as error:
+        logger.exception(
+            "Monthly template was not found"
+        )
+
+        await update.message.reply_text(
+            "❌ لم أجد ملف "
+            "monthly_results_card.jpg.\n"
+            f"{error}"
+        )
+
+    except Exception as error:
+        logger.exception(
+            "Failed to publish monthly card"
+        )
+
+        await update.message.reply_text(
+            "❌ تعذر إنشاء البطاقة الشهرية.\n"
+            f"نوع الخطأ: {type(error).__name__}"
+        )
+
+
+# =========================================================
 # أمر /status
 # =========================================================
 
@@ -1950,13 +2236,18 @@ async def status_command(
         "call_card.jpg": CALL_TEMPLATE.exists(),
         "put_card.jpg": PUT_TEMPLATE.exists(),
         "success_card.jpg": SUCCESS_TEMPLATE.exists(),
-        (
-            "highest_price_card.jpg"
-        ): HIGHEST_PRICE_TEMPLATE.exists(),
-        "Stop-Loss.jpg": STOP_LOSS_TEMPLATE.exists(),
-        (
-            "weekly_results_card.jpg"
-        ): WEEKLY_TEMPLATE.exists(),
+        "highest_price_card.jpg": (
+            HIGHEST_PRICE_TEMPLATE.exists()
+        ),
+        "Stop-Loss.jpg": (
+            STOP_LOSS_TEMPLATE.exists()
+        ),
+        "weekly_results_card.jpg": (
+            WEEKLY_TEMPLATE.exists()
+        ),
+        "monthly_results_card.jpg": (
+            MONTHLY_TEMPLATE.exists()
+        ),
     }
 
     missing_templates = [
@@ -1973,14 +2264,17 @@ async def status_command(
             "✅ قالب SUCCESS موجود.\n"
             "✅ قالب HIGHEST PRICE موجود.\n"
             "✅ قالب STOP LOSS موجود.\n"
-            "✅ قالب WEEKLY موجود."
+            "✅ قالب WEEKLY موجود.\n"
+            "✅ قالب MONTHLY موجود."
         )
 
     else:
         message = (
             "🟠 البوت يعمل، لكن القوالب "
             "التالية غير موجودة:\n"
-            + "\n".join(missing_templates)
+            + "\n".join(
+                missing_templates
+            )
         )
 
     await update.message.reply_text(
@@ -2061,6 +2355,13 @@ def main() -> None:
         CommandHandler(
             "weekly",
             weekly_command,
+        )
+    )
+
+    application.add_handler(
+        CommandHandler(
+            "monthly",
+            monthly_command,
         )
     )
 
