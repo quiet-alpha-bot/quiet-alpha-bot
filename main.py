@@ -17,6 +17,7 @@ from telegram.ext import Application, CommandHandler, ContextTypes
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 SIGNAL_CHAT_ID = os.getenv("SIGNAL_CHAT_ID")
+OWNER_USER_ID_RAW = os.getenv("OWNER_USER_ID")
 
 RIYADH_TIMEZONE = ZoneInfo("Asia/Riyadh")
 BASE_DIR = Path(__file__).resolve().parent
@@ -44,6 +45,62 @@ logging.basicConfig(
 )
 
 logger = logging.getLogger("quiet-alpha-bot")
+
+# httpx logs every request URL at INFO level; Telegram URLs contain the
+# bot token, so keep that logger at WARNING to never print the token.
+logging.getLogger("httpx").setLevel(logging.WARNING)
+
+
+# =========================================================
+# صلاحية المالك (OWNER_USER_ID)
+# =========================================================
+
+def parse_owner_user_id(raw_value):
+    """Telegram user ids are positive integers; anything else is invalid."""
+    if raw_value is None:
+        return None
+
+    raw_value = raw_value.strip()
+
+    if not raw_value.isdigit():
+        return None
+
+    value = int(raw_value)
+
+    return value if value > 0 else None
+
+
+OWNER_USER_ID = parse_owner_user_id(OWNER_USER_ID_RAW)
+
+if OWNER_USER_ID is None:
+    logger.error(
+        "OWNER_USER_ID is missing or invalid. "
+        "Protected commands are locked (fail closed)."
+    )
+
+
+async def ensure_owner(update: Update) -> bool:
+    """Fail closed: only OWNER_USER_ID may run protected commands."""
+    user = update.effective_user
+
+    if (
+        OWNER_USER_ID is not None
+        and user is not None
+        and user.id == OWNER_USER_ID
+    ):
+        return True
+
+    logger.warning(
+        "Unauthorized command attempt from user %s",
+        getattr(user, "id", None),
+    )
+
+    if update.message is not None:
+        await update.message.reply_text(
+            "⛔ غير مصرح."
+        )
+
+    return False
 
 
 # =========================================================
@@ -1079,6 +1136,9 @@ async def call_command(
     if update.message is None:
         return
 
+    if not await ensure_owner(update):
+        return
+
     if len(context.args) != 2:
         await update.message.reply_text(
             "❌ الاستخدام الصحيح:\n\n"
@@ -1145,6 +1205,9 @@ async def put_command(
     if update.message is None:
         return
 
+    if not await ensure_owner(update):
+        return
+
     if len(context.args) != 2:
         await update.message.reply_text(
             "❌ الاستخدام الصحيح:\n\n"
@@ -1209,6 +1272,9 @@ async def win_command(
 ) -> None:
 
     if update.message is None:
+        return
+
+    if not await ensure_owner(update):
         return
 
     if len(context.args) != 2:
@@ -1286,6 +1352,9 @@ async def max_command(
 ) -> None:
 
     if update.message is None:
+        return
+
+    if not await ensure_owner(update):
         return
 
     if len(context.args) != 2:
@@ -1380,6 +1449,9 @@ async def stop_command(
     if update.message is None:
         return
 
+    if not await ensure_owner(update):
+        return
+
     if len(context.args) != 1:
         await update.message.reply_text(
             "❌ الاستخدام الصحيح:\n\n"
@@ -1450,6 +1522,9 @@ async def status_command(
     if update.message is None:
         return
 
+    if not await ensure_owner(update):
+        return
+
     templates = {
         "call_card.jpg": CALL_TEMPLATE.exists(),
         "put_card.jpg": PUT_TEMPLATE.exists(),
@@ -1501,6 +1576,45 @@ async def error_handler(
         "Telegram update caused an error",
         exc_info=context.error,
     )
+
+
+# =========================================================
+# Private Automation (اختياري)
+# AUTOMATION_ENABLED=false → البوت اليدوي فقط، تمامًا كما كان
+# =========================================================
+
+def automation_enabled() -> bool:
+    value = os.getenv("AUTOMATION_ENABLED", "")
+
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def setup_private_automation(application: Application) -> None:
+
+    if not automation_enabled():
+        logger.info("Automation disabled (AUTOMATION_ENABLED is not true)")
+        return
+
+    try:
+        from automation.cards import CardRenderers
+        from automation.runtime import setup_automation
+
+        renderers = CardRenderers(
+            create_signal_card=create_signal_card,
+            create_success_card=create_success_card,
+            create_highest_price_card=create_highest_price_card,
+            create_stop_loss_card=create_stop_loss_card,
+            calculate_highest_result=calculate_highest_result,
+            format_strike=format_strike,
+            format_premium=format_premium,
+        )
+
+        setup_automation(application, renderers)
+
+    except Exception:
+        logger.exception(
+            "Automation setup failed. Manual bot continues normally."
+        )
 
 
 # =========================================================
@@ -1567,6 +1681,8 @@ def main() -> None:
     application.add_error_handler(
         error_handler
     )
+
+    setup_private_automation(application)
 
     logger.info(
         "Quiet Alpha Card Bot started successfully"

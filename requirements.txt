@@ -1,2 +1,5 @@
 python-telegram-bot==22.2
 Pillow
+httpx==0.28.1
+aiohttp==3.12.15
+asyncpg==0.30.0
