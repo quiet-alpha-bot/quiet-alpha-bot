@@ -407,6 +407,17 @@ class Tracker:
         if await self.flush_events(trade_id):
             significant = True
 
+        # Close only after at least one profit milestone was reached and
+        # the executable bid later falls below the approved entry. Closing
+        # here lets HIGHEST_CARD_TRIGGER=on_close publish the trade's peak.
+        if (
+            quote.bid is not None
+            and int(trade["highest_milestone_reached"] or 0) > 0
+            and quote.bid < entry
+        ):
+            await self.close(trade_id, "FELL_BELOW_ENTRY")
+            return
+
         # ---- live tracking message ----------------------------------
         if not self.s.flags.tracking:
             return
@@ -422,3 +433,4 @@ class Tracker:
 
 
 __all__ = ["Tracker", "strike_text"]
+
