@@ -211,19 +211,39 @@ class Tracker:
         )
         label = label_for(trade)
         progressed = False
-        for event in events:
+        index = 0
+        while index < len(events):
+            event = events[index]
             bid = event.bid if event.bid is not None else trade["current_bid"]
             if event.kind == "MILESTONE":
+                # A single UW poll can jump across several 10% thresholds.
+                # Keep every threshold in the database, but publish one compact
+                # notification for each consecutive milestone run so users do
+                # not receive many messages with the same observed bid.
+                run = [event]
+                while (
+                    index + len(run) < len(events)
+                    and events[index + len(run)].kind == "MILESTONE"
+                ):
+                    run.append(events[index + len(run)])
+                event = run[-1]
+                bid = event.bid if event.bid is not None else trade["current_bid"]
+                start_level = run[0].level if len(run) > 1 else None
                 await self.publisher.text_once(
                     "trade", trade_id, "MILESTONE",
-                    milestone_notification(label, event.level, bid),
+                    milestone_notification(label, event.level, bid, start_level),
                     level=event.level,
-                    payload={"observed_bid": str(bid), "threshold": str(event.threshold)},
+                    payload={
+                        "observed_bid": str(bid),
+                        "threshold": str(event.threshold),
+                        "start_level": start_level,
+                    },
                     max_attempts=ORDERED_EVENT_MAX_ATTEMPTS,
                 )
                 if not await self._event_done(trade_id, "MILESTONE", event.level):
                     break
                 await self.db.execute(q.SET_TRADE_MILESTONE, trade_id, event.level)
+                index += len(run)
             else:
                 await self.publisher.photo_once(
                     "trade", trade_id, "SUCCESS_CARD",
@@ -234,6 +254,7 @@ class Tracker:
                 if not await self._event_done(trade_id, "SUCCESS_CARD", 0):
                     break
                 await self.db.execute(q.MARK_SUCCESS_SENT, trade_id)
+                index += 1
             progressed = True
         return progressed
 
