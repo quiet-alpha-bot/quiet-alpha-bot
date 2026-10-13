@@ -243,6 +243,25 @@ class ApprovalHandler:
         if trade is None:
             return
 
+        # A newly approved opposite-direction trade replaces any currently
+        # tracked trade in the other direction. Close the old trade first so
+        # its live message is finalized and (when configured) its highest
+        # price card is published before the new entry card starts.
+        active_trades = await rt.db.fetch(q.TRACKING_TRADES)
+        for active_trade in active_trades:
+            if (
+                active_trade["id"] != trade["id"]
+                and active_trade["direction"] != trade["direction"]
+            ):
+                try:
+                    await rt.tracker.close(active_trade["id"], "OPPOSITE_SIGNAL")
+                except Exception:
+                    logger.exception(
+                        "Failed to close opposite trade #%s before trade #%s",
+                        active_trade["id"],
+                        trade["id"],
+                    )
+
         footer = (
             f"<b>✅ APPROVED — Entry {usd(approved_entry)} · Trade #{trade['id']}</b>\n"
             f"<i>Suggested {usd(Decimal(proposal['suggested_entry']))} · "
@@ -257,3 +276,4 @@ class ApprovalHandler:
         )
         # Entry card + tracking message now (the leader tracker also retries).
         await rt.tracker.ensure_started(trade)
+
