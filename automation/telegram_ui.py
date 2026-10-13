@@ -212,8 +212,17 @@ def tracking_text(
     return "\n".join(lines)
 
 
-def milestone_notification(label: str, level: int, bid: Decimal) -> str:
-    return f"🦋 {escape(label)} | +{level}% | Bid {usd(bid)}"
+def milestone_notification(
+    label: str,
+    level: int,
+    bid: Decimal,
+    start_level: Optional[int] = None,
+) -> str:
+    if start_level is not None and start_level < level:
+        progress = f"+{start_level}% → +{level}%"
+    else:
+        progress = f"+{level}%"
+    return f"🦋 {escape(label)} | {progress} | Bid {usd(bid)}"
 
 
 def watch_notification(
@@ -237,3 +246,4 @@ def signal_status_text(direction: str, status: str, reason: Optional[str], signa
         + (f"{escape(reason)}\n" if reason else "")
         + f"<code>{escape(signal_id)}</code>"
     )
+
