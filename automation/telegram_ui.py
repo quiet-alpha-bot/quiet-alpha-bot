@@ -198,8 +198,13 @@ def tracking_text(
         "",
     ]
     items = progress_items(entry, highest_milestone, step_pct, success_detected, success_gain)
+    success_dollars = (success_gain * Decimal("100")).quantize(Decimal("1"))
     for _, item in items:
-        lines.append("⭐ +$100 SUCCESS" if item == "SUCCESS" else f"✅ {item}")
+        lines.append(
+            f"⭐ +${success_dollars} SUCCESS"
+            if item == "SUCCESS"
+            else f"✅ {item}"
+        )
     if not items:
         lines.append("⏳ بانتظار +10%")
     lines.append("")
