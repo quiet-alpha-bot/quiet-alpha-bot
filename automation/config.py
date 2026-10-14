@@ -234,7 +234,7 @@ class TrackingSettings:
     poll_seconds: int
     message_refresh_seconds: int
     milestone_step_pct: int
-    # Approved rule: SUCCESS = approved_entry + $1.00 (+$100 gross/contract).
+    # Approved rule: SUCCESS = approved_entry + $0.50 (+$50 gross/contract).
     success_premium_gain: Decimal
     stop_time_et: time
     # OPEN DECISION: "none" (default) or "on_close".
@@ -388,10 +388,10 @@ def load_settings() -> Settings:
     )
 
     tracking = TrackingSettings(
-        poll_seconds=env_int("TRACKING_POLL_SECONDS", 15) or 15,
+        poll_seconds=env_int("TRACKING_POLL_SECONDS", 5) or 5,
         message_refresh_seconds=env_int("TRACKING_MESSAGE_REFRESH_SECONDS", 60) or 0,
         milestone_step_pct=env_int("MILESTONE_STEP_PCT", 10) or 10,
-        success_premium_gain=env_decimal("SUCCESS_PREMIUM_GAIN", "1.00"),
+        success_premium_gain=env_decimal("SUCCESS_PREMIUM_GAIN", "0.50"),
         stop_time_et=env_time("TRACKING_STOP_TIME_ET", "16:00"),
         highest_card_trigger=(env_str("HIGHEST_CARD_TRIGGER", "none") or "none").lower(),
         pending_stale_seconds=max(300, env_int("EVENT_PENDING_STALE_SECONDS", 600) or 600),
