@@ -81,6 +81,23 @@ UW_STATUS_TEXT = {
 }
 
 
+def strength_label(value: Decimal) -> str:
+    """Arabic rating for the pre-approval composite strength only."""
+    if value >= Decimal("80"):
+        return "قوية"
+    if value >= Decimal("65"):
+        return "جيدة"
+    if value >= Decimal("50"):
+        return "متوسطة"
+    return "ضعيفة"
+
+
+def strength_pct(value: Optional[Decimal]) -> str:
+    if value is None:
+        return "—"
+    return f"{value.quantize(Decimal('1'))}%"
+
+
 def proposal_text(
     proposal_id: int,
     direction: str,
@@ -100,6 +117,10 @@ def proposal_text(
     event_type: Optional[str],
     expires_at: Optional[datetime],
     tz_name: str,
+    tv_strength: Optional[Decimal] = None,
+    uw_strength: Optional[Decimal] = None,
+    composite_strength: Optional[Decimal] = None,
+    uw_aligned: Optional[bool] = None,
 ) -> str:
     spread = (ask - bid) if (bid is not None and ask is not None) else None
     status = UW_STATUS_TEXT.get(classification, classification or "—")
@@ -111,6 +132,22 @@ def proposal_text(
         f"Direction: <b>{escape(direction)}</b>",
         f"Source: {escape(classification or 'N/A')}",
         f"UW Confirmation: {escape(status)}",
+    ]
+    if composite_strength is not None:
+        alignment = (
+            "متوافق ✅" if uw_aligned is True else
+            "معاكس ⚠️" if uw_aligned is False else
+            "غير متوفر"
+        )
+        lines.extend(
+            [
+                f"قوة الصفقة: <b>{strength_pct(composite_strength)} — {strength_label(composite_strength)}</b>",
+                f"TradingView: {strength_pct(tv_strength)}",
+                f"UW: {strength_pct(uw_strength)} · {alignment}",
+            ]
+        )
+    lines.extend(
+        [
         "Contract: SPXW",
         f"Strike: <b>{escape(strike_text(strike))}</b>",
         f"Expiration: {escape(expiry_text)}",
@@ -125,7 +162,8 @@ def proposal_text(
         "",
         f"Signal Time: {display_time(signal_time, tz_name)}"
         + (f" · {escape(event_type)}" if event_type else ""),
-    ]
+        ]
+    )
     if reasons:
         lines.append("Selection: " + escape(" · ".join(reasons)))
     if uw_context:
@@ -251,4 +289,3 @@ def signal_status_text(direction: str, status: str, reason: Optional[str], signa
         + (f"{escape(reason)}\n" if reason else "")
         + f"<code>{escape(signal_id)}</code>"
     )
-
