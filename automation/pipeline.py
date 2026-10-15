@@ -12,9 +12,10 @@ and continues normally.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from datetime import timedelta
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from typing import Optional
 
 from . import queries as q
@@ -41,6 +42,58 @@ logger = logging.getLogger("quiet-alpha.pipeline")
 def _seconds(value: Optional[float]) -> Optional[Decimal]:
     """NUMERIC parameters are passed as Decimal (asyncpg-safe)."""
     return None if value is None else Decimal(str(round(value, 3)))
+
+
+def _percent(value) -> Optional[Decimal]:
+    """Parse and clamp a percentage coming from an external payload."""
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        parsed = Decimal(str(value))
+    except (InvalidOperation, TypeError, ValueError):
+        return None
+    if not parsed.is_finite():
+        return None
+    return max(Decimal("0"), min(Decimal("100"), parsed))
+
+
+def _payload_strength(row) -> Optional[Decimal]:
+    payload = row["payload"]
+    if isinstance(payload, str):
+        try:
+            payload = json.loads(payload)
+        except (TypeError, ValueError):
+            return None
+    if not isinstance(payload, dict):
+        return None
+    return _percent(payload.get("strength"))
+
+
+def _proposal_strengths(row, result, watch_rows: dict):
+    """Return TV, UW and 50/50 composite strength for the proposal card."""
+    tv_strength = _payload_strength(row)
+    uw_strength = None
+    uw_aligned = None
+
+    if result is not None and result.primary_watch is not None:
+        watch = watch_rows.get(result.primary_watch.id)
+        if watch is not None and watch["strength"] is not None:
+            raw = abs(Decimal(str(watch["strength"])))
+            # UW watch strength is normally 0..1; tolerate an already-percent value.
+            uw_strength = _percent(raw * 100 if raw <= 1 else raw)
+            uw_aligned = result.primary_watch.direction.value == row["direction"]
+
+    if tv_strength is not None and uw_strength is not None:
+        uw_contribution = uw_strength if uw_aligned else Decimal("100") - uw_strength
+        composite = (tv_strength + uw_contribution) / Decimal("2")
+    elif tv_strength is not None:
+        composite = tv_strength
+    elif uw_strength is not None:
+        composite = uw_strength if uw_aligned else Decimal("100") - uw_strength
+    else:
+        composite = None
+
+    return tv_strength, uw_strength, _percent(composite), uw_aligned
 
 
 class SignalPipeline:
@@ -227,6 +280,9 @@ class SignalPipeline:
             return
 
         reasons = selection_reasons(selection)
+        tv_strength, uw_strength, composite_strength, uw_aligned = _proposal_strengths(
+            row, result, watch_rows
+        )
         expires_at = (
             utcnow() + timedelta(seconds=self.s.approval.proposal_expiry_seconds)
             if self.s.approval.proposal_expiry_seconds
@@ -239,6 +295,10 @@ class SignalPipeline:
             "watch_engine_active": watch_active,
             "event_type": row["event_type"],
             "chain_ticker": ticker,
+            "tv_strength": str(tv_strength) if tv_strength is not None else None,
+            "uw_strength": str(uw_strength) if uw_strength is not None else None,
+            "composite_strength": str(composite_strength) if composite_strength is not None else None,
+            "uw_aligned": uw_aligned,
         }
         proposal = await self.db.fetchrow(
             q.INSERT_PROPOSAL,
@@ -279,6 +339,10 @@ class SignalPipeline:
             event_type=row["event_type"],
             expires_at=expires_at,
             tz_name=self.s.market.display_timezone,
+            tv_strength=tv_strength,
+            uw_strength=uw_strength,
+            composite_strength=composite_strength,
+            uw_aligned=uw_aligned,
         )
         message_id = await self.publisher.text_once(
             "proposal",
