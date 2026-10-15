@@ -211,56 +211,52 @@ class ApprovalHandler:
         rt = self.rt
         signal = await rt.db.fetchrow(q.GET_SIGNAL, proposal["signal_db_id"])
         now = utcnow()
+        trade = None
+        limit_hit = False
         assert rt.db.pool is not None
         async with rt.db.pool.acquire() as conn:
             async with conn.transaction():
-                finalized = await conn.fetchval(
-                    q.FINALIZE_APPROVAL, proposal["id"], user_id,
-                    f"approved at {approved_entry}",
+                await conn.execute(q.LOCK_TRADE_DIRECTION, proposal["direction"])
+                active_count = await conn.fetchval(
+                    q.COUNT_TRACKING_DIRECTION, proposal["direction"]
                 )
-                if finalized is None:
-                    return
-                trade = await conn.fetchrow(
-                    q.INSERT_TRADE,
-                    proposal["id"],
-                    proposal["signal_db_id"],
-                    signal["signal_id"],
-                    proposal["option_symbol"],
-                    proposal["direction"],
-                    proposal["strike"],
-                    proposal["expiry"],
-                    proposal["suggested_entry"],
-                    approved_entry,
-                    quote.as_record(),
-                    proposal["classification"],
-                    proposal["uw_watch_id"],
-                    signal["signal_time"],
-                    now,
-                    quote.bid,
-                    quote.ask,
-                    quote.last,
-                )
+                if active_count >= 3:
+                    limit_hit = True
+                else:
+                    finalized = await conn.fetchval(
+                        q.FINALIZE_APPROVAL, proposal["id"], user_id,
+                        f"approved at {approved_entry}",
+                    )
+                    if finalized is not None:
+                        trade = await conn.fetchrow(
+                            q.INSERT_TRADE,
+                            proposal["id"],
+                            proposal["signal_db_id"],
+                            signal["signal_id"],
+                            proposal["option_symbol"],
+                            proposal["direction"],
+                            proposal["strike"],
+                            proposal["expiry"],
+                            proposal["suggested_entry"],
+                            approved_entry,
+                            quote.as_record(),
+                            proposal["classification"],
+                            proposal["uw_watch_id"],
+                            signal["signal_time"],
+                            now,
+                            quote.bid,
+                            quote.ask,
+                            quote.last,
+                        )
+        if limit_hit:
+            await rt.db.execute(q.REVERT_APPROVAL, proposal["id"])
+            await rt.publisher.text(
+                f"⚠️ يوجد بالفعل 3 صفقات {proposal['direction']} مفتوحة.\n"
+                "لم تُغلق أي صفقة، والاقتراح بقي مفتوحًا للمراجعة."
+            )
+            return
         if trade is None:
             return
-
-        # A newly approved opposite-direction trade replaces any currently
-        # tracked trade in the other direction. Close the old trade first so
-        # its live message is finalized and (when configured) its highest
-        # price card is published before the new entry card starts.
-        active_trades = await rt.db.fetch(q.TRACKING_TRADES)
-        for active_trade in active_trades:
-            if (
-                active_trade["id"] != trade["id"]
-                and active_trade["direction"] != trade["direction"]
-            ):
-                try:
-                    await rt.tracker.close(active_trade["id"], "OPPOSITE_SIGNAL")
-                except Exception:
-                    logger.exception(
-                        "Failed to close opposite trade #%s before trade #%s",
-                        active_trade["id"],
-                        trade["id"],
-                    )
 
         footer = (
             f"<b>✅ APPROVED — Entry {usd(approved_entry)} · Trade #{trade['id']}</b>\n"
@@ -276,4 +272,3 @@ class ApprovalHandler:
         )
         # Entry card + tracking message now (the leader tracker also retries).
         await rt.tracker.ensure_started(trade)
-
