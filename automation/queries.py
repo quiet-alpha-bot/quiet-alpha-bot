@@ -32,7 +32,7 @@ UPDATE signals
 SET status = 'PROCESSING', processing_started_at = now(), updated_at = now()
 WHERE id = $1 AND status = 'RECEIVED'
 RETURNING id, signal_id, direction, event_type, ticker, timeframe,
-          tv_price, signal_time, received_at
+          tv_price, signal_time, received_at, payload
 """
 
 UNPROCESSED_SIGNALS = """
