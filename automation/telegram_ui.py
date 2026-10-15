@@ -121,6 +121,7 @@ def proposal_text(
     uw_strength: Optional[Decimal] = None,
     composite_strength: Optional[Decimal] = None,
     uw_aligned: Optional[bool] = None,
+    pre_proposal_high: Optional[Decimal] = None,
 ) -> str:
     spread = (ask - bid) if (bid is not None and ask is not None) else None
     status = UW_STATUS_TEXT.get(classification, classification or "—")
@@ -158,6 +159,7 @@ def proposal_text(
         f"Ask: {usd(ask)}",
         f"Spread: {usd(spread)}",
         f"Current Premium (Last): {usd(last)}",
+        f"Pre-Proposal High (Bid): <b>{usd(pre_proposal_high)}</b>",
         f"Success Level: <b>{usd(success_price(suggested_entry, success_gain))}</b>",
         "",
         f"Signal Time: {display_time(signal_time, tz_name)}"
