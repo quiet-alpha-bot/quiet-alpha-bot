@@ -260,12 +260,25 @@ def milestone_notification(
     level: int,
     bid: Decimal,
     start_level: Optional[int] = None,
+    elapsed_seconds: Optional[float] = None,
 ) -> str:
     if start_level is not None and start_level < level:
         progress = f"+{start_level}% → +{level}%"
     else:
         progress = f"+{level}%"
-    return f"🦋 {escape(label)} | {progress} | Bid {usd(bid)}"
+    elapsed = ""
+    if elapsed_seconds is not None:
+        total = max(0, int(round(elapsed_seconds)))
+        hours, remainder = divmod(total, 3600)
+        minutes, seconds = divmod(remainder, 60)
+        if hours:
+            duration = f"{hours}س {minutes}د {seconds}ث"
+        elif minutes:
+            duration = f"{minutes}د {seconds}ث"
+        else:
+            duration = f"{seconds}ث"
+        elapsed = f" | خلال {duration}"
+    return f"🦋 {escape(label)} | {progress} | Bid {usd(bid)}{elapsed}"
 
 
 def watch_notification(
