@@ -260,7 +260,9 @@ class SignalPipeline:
             return
 
         chosen = selection.selected.quote
-        entry_result, latest = await self._entry_loop(run_id, chosen, signal_time)
+        entry_result, latest, pre_proposal_high = await self._entry_loop(
+            run_id, chosen, signal_time
+        )
         if entry_result.decision is not EntryDecision.ENTER:
             await self._finish_run(run_id, "SKIPPED", entry_result.reason, ticker, expiry,
                                    spot, selection.candidates, chosen.symbol, meta)
@@ -299,6 +301,9 @@ class SignalPipeline:
             "uw_strength": str(uw_strength) if uw_strength is not None else None,
             "composite_strength": str(composite_strength) if composite_strength is not None else None,
             "uw_aligned": uw_aligned,
+            "pre_proposal_high": (
+                str(pre_proposal_high) if pre_proposal_high is not None else None
+            ),
         }
         proposal = await self.db.fetchrow(
             q.INSERT_PROPOSAL,
@@ -343,6 +348,7 @@ class SignalPipeline:
             uw_strength=uw_strength,
             composite_strength=composite_strength,
             uw_aligned=uw_aligned,
+            pre_proposal_high=pre_proposal_high,
         )
         message_id = await self.publisher.text_once(
             "proposal",
@@ -382,7 +388,11 @@ class SignalPipeline:
                 {"observations": len(history), "first_ask": str(first_ask)},
             )
             if result.decision is not EntryDecision.WAIT:
-                return result, latest_quote
+                highest_bid = max(
+                    (observation.bid for observation in history if observation.bid is not None),
+                    default=None,
+                )
+                return result, latest_quote, highest_bid
             await asyncio.sleep(e.poll_seconds)
             try:
                 quotes, _ = await self.uw.quotes_for([chosen.symbol])
@@ -399,7 +409,11 @@ class SignalPipeline:
             history, first_ask, signal_time, window_start,
             window_start + timedelta(seconds=e.window_seconds + 1), e, self.s.selection,
         )
-        return final, latest_quote
+        highest_bid = max(
+            (observation.bid for observation in history if observation.bid is not None),
+            default=None,
+        )
+        return final, latest_quote, highest_bid
 
     async def _store_candidates(self, run_id: int, candidates) -> None:
         rows = []
