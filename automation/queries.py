@@ -244,6 +244,17 @@ RETURNING id
 # ---------------------------------------------------------
 # Trades
 # ---------------------------------------------------------
+# Serialize approvals per direction so two fast button presses cannot exceed
+# the three-open-trades limit.
+LOCK_TRADE_DIRECTION = """
+SELECT pg_advisory_xact_lock(hashtext('quiet-alpha-trades-' || $1))
+"""
+
+COUNT_TRACKING_DIRECTION = """
+SELECT count(*) FROM trades
+WHERE status = 'TRACKING' AND direction = $1
+"""
+
 INSERT_TRADE = """
 INSERT INTO trades (proposal_id, signal_db_id, signal_id, option_symbol,
                     direction, strike, expiry, suggested_entry, approved_entry,
