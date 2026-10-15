@@ -272,12 +272,12 @@ def milestone_notification(
         hours, remainder = divmod(total, 3600)
         minutes, seconds = divmod(remainder, 60)
         if hours:
-            duration = f"{hours}س {minutes}د {seconds}ث"
+            duration = f"{hours}h {minutes}m {seconds}s"
         elif minutes:
-            duration = f"{minutes}د {seconds}ث"
+            duration = f"{minutes}m {seconds}s"
         else:
-            duration = f"{seconds}ث"
-        elapsed = f" | خلال {duration}"
+            duration = f"{seconds}s"
+        elapsed = f" | Time: {duration}"
     return f"🦋 {escape(label)} | {progress} | Bid {usd(bid)}{elapsed}"
 
 
