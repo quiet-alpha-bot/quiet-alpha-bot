@@ -229,14 +229,22 @@ class Tracker:
                 event = run[-1]
                 bid = event.bid if event.bid is not None else trade["current_bid"]
                 start_level = run[0].level if len(run) > 1 else None
+                elapsed_seconds = (
+                    (utcnow() - trade["approval_time"]).total_seconds()
+                    if trade["approval_time"] is not None
+                    else None
+                )
                 await self.publisher.text_once(
                     "trade", trade_id, "MILESTONE",
-                    milestone_notification(label, event.level, bid, start_level),
+                    milestone_notification(
+                        label, event.level, bid, start_level, elapsed_seconds
+                    ),
                     level=event.level,
                     payload={
                         "observed_bid": str(bid),
                         "threshold": str(event.threshold),
                         "start_level": start_level,
+                        "elapsed_seconds": elapsed_seconds,
                     },
                     max_attempts=ORDERED_EVENT_MAX_ATTEMPTS,
                 )
@@ -454,4 +462,3 @@ class Tracker:
 
 
 __all__ = ["Tracker", "strike_text"]
-
