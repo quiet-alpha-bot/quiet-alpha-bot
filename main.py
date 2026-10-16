@@ -26,7 +26,7 @@ CALL_TEMPLATE = BASE_DIR / "call_card.jpg"
 PUT_TEMPLATE = BASE_DIR / "put_card.jpg"
 SUCCESS_TEMPLATE = BASE_DIR / "success_card.jpg"
 HIGHEST_PRICE_TEMPLATE = BASE_DIR / "highest_price_card.jpg"
-STOP_LOSS_TEMPLATE = BASE_DIR / "STOP_LOSS_CARD.jpg"
+STOP_LOSS_TEMPLATE = BASE_DIR / "STOP_LOSS_CARD_50.jpg"
 
 if not BOT_TOKEN:
     raise ValueError("BOT_TOKEN is missing")
@@ -199,7 +199,7 @@ HIGHEST_DATE_BOX = (
 
 # =========================================================
 # خانات بطاقة وقف الخسارة
-# STOP_LOSS_CARD.jpg = 1536 × 1024
+# STOP_LOSS_CARD_50.jpg = 1536 × 1024
 # =========================================================
 
 STOP_ENTRY_BOX = (
@@ -248,7 +248,7 @@ MIN_FONT_RATIO = 0.022
 # إعدادات وقف الخسارة
 # =========================================================
 
-STOP_LOSS_PERCENTAGE = 0.30
+STOP_LOSS_PERCENTAGE = 0.50
 
 
 # =========================================================
@@ -360,7 +360,7 @@ def calculate_highest_result(
 
 
 # =========================================================
-# حساب وقف الخسارة 30%
+# حساب وقف الخسارة 50%
 # =========================================================
 
 def calculate_stop_loss(
@@ -919,7 +919,7 @@ def create_stop_loss_card(
     if not STOP_LOSS_TEMPLATE.exists():
         raise FileNotFoundError(
             "Template image was not found: "
-            "STOP_LOSS_CARD.jpg"
+            "STOP_LOSS_CARD_50.jpg"
         )
 
     entry_value = float(entry_price)
@@ -1476,7 +1476,7 @@ async def stop_command(
 
         await update.message.reply_text(
             "✅ تم إنشاء ونشر بطاقة وقف الخسارة.\n\n"
-            f"🛡️ الوقف: 30%\n"
+            f"🛡️ الوقف: 50%\n"
             f"🔻 الخسارة: "
             f"{format_loss(loss_value)}"
         )
@@ -1495,7 +1495,7 @@ async def stop_command(
         )
 
         await update.message.reply_text(
-            "❌ لم أجد ملف Stop-Loss.jpg.\n"
+            "❌ لم أجد ملف STOP_LOSS_CARD_50.jpg.\n"
             f"{error}"
         )
 
@@ -1532,7 +1532,7 @@ async def status_command(
         (
             "highest_price_card.jpg"
         ): HIGHEST_PRICE_TEMPLATE.exists(),
-        "STOP_LOSS_CARD.jpg": STOP_LOSS_TEMPLATE.exists(),
+        "STOP_LOSS_CARD_50.jpg": STOP_LOSS_TEMPLATE.exists(),
     }
 
     missing_templates = [
