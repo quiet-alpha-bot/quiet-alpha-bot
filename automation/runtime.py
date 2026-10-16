@@ -43,7 +43,7 @@ logger = logging.getLogger("quiet-alpha.runtime")
 
 LEADER_RETRY_SECONDS = 15
 MAINTENANCE_SECONDS = 30
-DAILY_REPORT_DELAY_MINUTES = 2
+DAILY_REPORT_DELAY_MINUTES = 5
 
 
 class AutomationRuntime:
