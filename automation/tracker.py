@@ -51,7 +51,7 @@ ORDERED_EVENT_MAX_ATTEMPTS = 1_000_000
 
 
 def hard_stop_price(entry: Decimal, loss_pct: Decimal) -> Decimal:
-    """Stop price before SUCCESS (30% below entry by default)."""
+    """Stop price before SUCCESS, using the configured loss percentage."""
     return entry * (Decimal("1") - loss_pct)
 
 
@@ -148,7 +148,7 @@ class Tracker:
             return None
         logger.info("Trade #%s closed (%s)", trade_id, reason)
         await self.refresh_message(trade_id, closed_reason=reason)
-        if reason == "STOP_LOSS_30" and self.s.flags.stop_loss_card:
+        if reason in {"STOP_LOSS_30", "STOP_LOSS_50"} and self.s.flags.stop_loss_card:
             await self.send_stop_loss_card(closed)
         if (
             self.s.flags.highest_card
@@ -174,7 +174,7 @@ class Tracker:
         )
 
     async def send_stop_loss_card(self, trade) -> Optional[int]:
-        """30% stop-loss card. Sent once and only before SUCCESS."""
+        """Configured stop-loss card. Sent once and only before SUCCESS."""
         entry = Decimal(trade["approved_entry"])
         return await self.publisher.photo_once(
             "trade",
@@ -475,7 +475,10 @@ class Tracker:
             if not success_achieved:
                 stop = hard_stop_price(entry, self.s.tracking.stop_loss_pct)
                 if quote.bid <= stop:
-                    await self.close(trade_id, "STOP_LOSS_30")
+                    await self.close(
+                        trade_id,
+                        f"STOP_LOSS_{int(self.s.tracking.stop_loss_pct * 100)}",
+                    )
                     return
             else:
                 stop = protected_stop_price(
