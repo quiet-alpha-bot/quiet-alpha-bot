@@ -74,27 +74,14 @@ def daily_report_text(
         f"{day.day} {ARABIC_MONTHS[day.month]} {day.year}",
         "",
         f"إجمالي الصفقات: <b>{summary['total']}</b>",
-        f"✅ رابحة (بلغت +${money(success_dollars)}): <b>{summary['wins']}</b>",
-        f"❌ خاسرة (أقل من +${money(success_dollars)}): <b>{summary['losses']}</b>",
+        f"✅ رابحة: <b>{summary['wins']}</b>",
+        f"❌ خاسرة: <b>{summary['losses']}</b>",
         f"نسبة النجاح: <b>{summary['win_rate'].quantize(Decimal('0.1'))}%</b>",
         "",
-        f"🛑 وقف -30%: {summary['stop_loss']}",
-        f"🛡 حماية رأس المال: {summary['protected']}",
-        f"⏰ نهاية الجلسة: {summary['session_end']}",
-        "",
-        f"📈 مجموع أعلى العوائد: {_signed_usd(summary['positive'])}",
-        f"📉 مجموع التراجع عند أعلى سعر: {_signed_usd(summary['negative'])}",
-        f"💰 المحصلة حسب أعلى Bid: <b>{_signed_usd(summary['net'])}</b>",
+        f"📈 مجموع إجمالي الربح: ${money(summary['positive'])}",
+        f"📉 مجموع إجمالي الخسارة: {'-' if summary['negative'] < 0 else ''}${money(abs(summary['negative']))}",
+        f"💰 صافي الربح: <b>{'-' if summary['net'] < 0 else ''}${money(abs(summary['net']))}</b>",
     ]
-
-    best_index = summary["best_index"]
-    if best_index is not None:
-        best = trades[best_index]
-        lines.extend([
-            "",
-            "🏆 <b>أفضل صفقة</b>",
-            f"{escape(best['option_symbol'])} · {_signed_usd(summary['results'][best_index])}",
-        ])
 
     if trades:
         lines.extend(["", "<b>تفاصيل الصفقات</b>"])
@@ -117,7 +104,7 @@ def daily_report_text(
 
     lines.extend([
         "",
-        f"<i>التصنيف يعتمد على أعلى Bid: النجاح يبدأ من +${money(success_dollars)}.</i>",
+        f"<i>التصنيف يعتمد على أعلى سعر تم تحقيقه: النجاح يبدأ من +${money(success_dollars)}.</i>",
     ])
     payload = {key: str(value) for key, value in summary.items() if key != "results"}
     return "\n".join(lines), payload
