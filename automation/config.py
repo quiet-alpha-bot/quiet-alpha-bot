@@ -129,6 +129,7 @@ class Flags:
     milestones: bool
     success_card: bool
     highest_card: bool
+    stop_loss_card: bool
 
     @classmethod
     def from_env(cls) -> "Flags":
@@ -143,6 +144,7 @@ class Flags:
             milestones=env_bool("MILESTONES_ENABLED"),
             success_card=env_bool("SUCCESS_CARD_ENABLED"),
             highest_card=env_bool("HIGHEST_CARD_ENABLED"),
+            stop_loss_card=env_bool("STOP_LOSS_CARD_ENABLED"),
         )
 
 
@@ -236,6 +238,10 @@ class TrackingSettings:
     milestone_step_pct: int
     # Approved rule: SUCCESS = approved_entry + $0.50 (+$50 gross/contract).
     success_premium_gain: Decimal
+    # Before SUCCESS: close at entry minus 30%.
+    stop_loss_pct: Decimal
+    # After SUCCESS: protect capital at entry minus $0.20 premium.
+    protected_stop_buffer: Decimal
     stop_time_et: time
     # OPEN DECISION: "none" (default) or "on_close".
     highest_card_trigger: str
@@ -310,6 +316,10 @@ class Settings:
             issues.append("PREMIUM_MIN must be below PREMIUM_MAX")
         if self.tracking.milestone_step_pct <= 0:
             issues.append("MILESTONE_STEP_PCT must be positive")
+        if not Decimal("0") < self.tracking.stop_loss_pct < Decimal("1"):
+            issues.append("STOP_LOSS_PCT must be greater than 0 and below 1")
+        if self.tracking.protected_stop_buffer < Decimal("0"):
+            issues.append("PROTECTED_STOP_BUFFER must not be negative")
         return issues
 
 
@@ -388,10 +398,12 @@ def load_settings() -> Settings:
     )
 
     tracking = TrackingSettings(
-        poll_seconds=env_int("TRACKING_POLL_SECONDS", 5) or 5,
+        poll_seconds=env_int("TRACKING_POLL_SECONDS", 1) or 1,
         message_refresh_seconds=env_int("TRACKING_MESSAGE_REFRESH_SECONDS", 60) or 0,
         milestone_step_pct=env_int("MILESTONE_STEP_PCT", 10) or 10,
         success_premium_gain=env_decimal("SUCCESS_PREMIUM_GAIN", "0.50"),
+        stop_loss_pct=env_decimal("STOP_LOSS_PCT", "0.30"),
+        protected_stop_buffer=env_decimal("PROTECTED_STOP_BUFFER", "0.20"),
         stop_time_et=env_time("TRACKING_STOP_TIME_ET", "16:00"),
         highest_card_trigger=(env_str("HIGHEST_CARD_TRIGGER", "none") or "none").lower(),
         pending_stale_seconds=max(300, env_int("EVENT_PENDING_STALE_SECONDS", 600) or 600),
