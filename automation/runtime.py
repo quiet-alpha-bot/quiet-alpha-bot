@@ -347,7 +347,8 @@ class AutomationRuntime:
             await update.message.reply_text("✅ أُرسلت بطاقة Highest Price إلى القناة.")
         else:
             await update.message.reply_text(
-                "لم تُرسل: إما أُرسلت سابقًا، أو أعلى Observed Bid ليس أعلى من الدخول."
+                "لم تُرسل: إما أُرسلت سابقًا، أو الصفقة لم تحقق +$50، "
+                "أو أعلى Observed Bid ليس أعلى من الدخول."
             )
 
 
