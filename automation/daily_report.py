@@ -1,4 +1,4 @@
-"""Daily text performance report based on each trade's highest observed Bid."""
+"""Daily report: peak Bid gains and losses at tracked closing Bid."""
 
 from __future__ import annotations
 
@@ -35,8 +35,18 @@ def summarize_daily_trades(trades: Sequence, success_dollars: Decimal) -> dict:
     wins = sum(result >= success_dollars for result in results)
     losses = len(results) - wins
     positive = sum((max(result, Decimal("0")) for result in results), Decimal("0"))
-    negative = sum((min(result, Decimal("0")) for result in results), Decimal("0"))
-    total = sum(results, Decimal("0"))
+    # current_bid is frozen when status becomes CLOSED: quote updates only
+    # apply to TRACKING rows. This is an observed price, not a broker fill.
+    closed_results = [
+        (Decimal(t["current_bid"]) - Decimal(t["approved_entry"])) * Decimal("100")
+        for t in trades
+        if t["status"] == "CLOSED" and t["current_bid"] is not None
+    ]
+    missing_close_prices = sum(
+        t["status"] == "CLOSED" and t["current_bid"] is None for t in trades
+    )
+    negative = sum((min(result, Decimal("0")) for result in closed_results), Decimal("0"))
+    total = positive + negative
     win_rate = (
         Decimal(wins) * Decimal("100") / Decimal(len(results))
         if results else Decimal("0")
@@ -44,6 +54,7 @@ def summarize_daily_trades(trades: Sequence, success_dollars: Decimal) -> dict:
     best_index = max(range(len(results)), key=results.__getitem__) if results else None
     return {
         "total": len(results),
+        "missing_close_prices": missing_close_prices,
         "wins": wins,
         "losses": losses,
         "win_rate": win_rate,
@@ -52,7 +63,7 @@ def summarize_daily_trades(trades: Sequence, success_dollars: Decimal) -> dict:
         "net": total,
         "best_index": best_index,
         "results": results,
-        "stop_loss": sum(t["close_reason"] == "STOP_LOSS_30" for t in trades),
+        "stop_loss": sum(t["close_reason"] in {"STOP_LOSS_30", "STOP_LOSS_50"} for t in trades),
         "protected": sum(t["close_reason"] == "PROTECTED_STOP" for t in trades),
         "session_end": sum(t["close_reason"] == "SESSION_END" for t in trades),
     }
@@ -106,6 +117,9 @@ def daily_report_text(
         "",
         f"<i>التصنيف يعتمد على أعلى سعر تم تحقيقه: النجاح يبدأ من +${money(success_dollars)}.</i>",
     ])
+    lines.append("<i>الربح من أعلى سعر مرصود، والخسارة من سعر إغلاق التتبع؛ لكل عقد ×100.</i>")
+    if summary["missing_close_prices"]:
+        lines.append(f"⚠️ {summary['missing_close_prices']} صفقة مغلقة بلا سعر إغلاق؛ خسائرها غير مكتملة.")
     payload = {key: str(value) for key, value in summary.items() if key != "results"}
     return "\n".join(lines), payload
 
