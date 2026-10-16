@@ -18,7 +18,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import replace
-from datetime import timedelta
+from datetime import date, timedelta
 from decimal import Decimal
 from typing import Optional
 
@@ -365,9 +365,22 @@ class AutomationRuntime:
         if not await self._guard(update):
             return
         day = et_date(utcnow())
+        if len(context.args) > 1:
+            await update.message.reply_text("الاستخدام: /qa_daily أو /qa_daily yesterday أو /qa_daily YYYY-MM-DD")
+            return
+        if context.args:
+            requested = context.args[0].strip().lower()
+            if requested in ("yesterday", "أمس", "امس"):
+                day -= timedelta(days=1)
+            else:
+                try:
+                    day = date.fromisoformat(requested)
+                except ValueError:
+                    await update.message.reply_text("التاريخ بصيغة YYYY-MM-DD، أو اكتبي /qa_daily yesterday")
+                    return
         trades = await self.db.fetch(q.DAILY_TRADES, day)
         if not trades:
-            await update.message.reply_text("لا توجد صفقات مسجلة اليوم.")
+            await update.message.reply_text(f"لا توجد صفقات مسجلة بتاريخ {day.isoformat()} حسب توقيت سوق نيويورك.")
             return
         text, _ = daily_report_text(
             trades, day, self.settings.tracking.success_premium_gain, preview=True
