@@ -84,23 +84,23 @@ def daily_report_text(
     ]
 
     if trades:
-        lines.extend(["", "<b>تفاصيل الصفقات</b>"])
+        lines.extend(["", "<b>تفاصيل الصفقات</b>", "سعر الدخول → أعلى سعر مرصود"])
         for index, (trade, result) in enumerate(
-            zip(trades[:12], summary["results"][:12]), start=1
+            zip(trades[:30], summary["results"][:30]), start=1
         ):
             entry = Decimal(trade["approved_entry"])
             highest = trade["highest_bid"]
             won = result >= success_dollars
             label = (
-                f"SPXW {strike_text(Decimal(trade['strike']))} {trade['direction']}"
+                f"{strike_text(Decimal(trade['strike']))} {trade['direction']}"
             )
             lines.append(
-                f"{index}. {'✅' if won else '❌'} {escape(label)} · "
-                f"دخول ${money(entry)} · أعلى ${money(highest) if highest is not None else '—'} "
-                f"· {_signed_usd(result)}"
+                f"{index}. {'✅' if won else '❌'} <code>{escape(label)} | "
+                f"{money(entry)} → {money(highest) if highest is not None else '—'} "
+                f"| {_signed_usd(result)}</code>"
             )
-        if len(trades) > 12:
-            lines.append(f"… و{len(trades) - 12} صفقات أخرى")
+        if len(trades) > 30:
+            lines.append(f"… و{len(trades) - 30} صفقات أخرى")
 
     lines.extend([
         "",
