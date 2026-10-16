@@ -272,6 +272,12 @@ TRACKING_TRADES = "SELECT * FROM trades WHERE status = 'TRACKING' ORDER BY id"
 
 RECENT_TRADES = "SELECT * FROM trades ORDER BY id DESC LIMIT $1"
 
+DAILY_TRADES = """
+SELECT * FROM trades
+WHERE (approval_time AT TIME ZONE 'America/New_York')::date = $1
+ORDER BY approval_time, id
+"""
+
 UPDATE_TRADE_QUOTE = """
 UPDATE trades
 SET current_bid = $2, current_ask = $3, current_last = $4,
