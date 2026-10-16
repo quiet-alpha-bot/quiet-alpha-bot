@@ -220,7 +220,7 @@ class ApprovalHandler:
                 active_count = await conn.fetchval(
                     q.COUNT_TRACKING_DIRECTION, proposal["direction"]
                 )
-                if active_count >= 3:
+                if active_count >= 6:
                     limit_hit = True
                 else:
                     finalized = await conn.fetchval(
@@ -251,7 +251,7 @@ class ApprovalHandler:
         if limit_hit:
             await rt.db.execute(q.REVERT_APPROVAL, proposal["id"])
             await rt.publisher.text(
-                f"⚠️ يوجد بالفعل 3 صفقات {proposal['direction']} مفتوحة.\n"
+                f"⚠️ يوجد بالفعل 6 صفقات {proposal['direction']} مفتوحة.\n"
                 "لم تُغلق أي صفقة، والاقتراح بقي مفتوحًا للمراجعة."
             )
             return
