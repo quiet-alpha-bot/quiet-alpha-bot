@@ -92,6 +92,8 @@ def daily_report_text(
         f"📈 مجموع إجمالي الربح: ${money(summary['positive'])}",
         f"📉 مجموع إجمالي الخسارة: {'-' if summary['negative'] < 0 else ''}${money(abs(summary['negative']))}",
         f"💰 صافي الربح: <b>{'-' if summary['net'] < 0 else ''}${money(abs(summary['net']))}</b>",
+        f"💰 صافي الربح: <b>{'-' if summary['net'] < 0 else ''}${money(abs(summary['net']))}</b>"
+        f" ≈ <b>{'-' if summary['net'] < 0 else ''}{money(abs(summary['net']) * Decimal('3.75'))} ر.س</b>",
     ]
 
     if trades:
