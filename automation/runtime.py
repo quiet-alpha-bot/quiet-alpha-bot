@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import replace
+from datetime import timedelta
 from decimal import Decimal
 from typing import Optional
 
@@ -29,9 +30,10 @@ from .approval import ApprovalHandler
 from .cards import CardRenderers, Publisher
 from .config import Settings, load_settings
 from .db import Database, LeaderLock
+from .daily_report import daily_report_text
 from .pipeline import SignalPipeline
 from .telegram_ui import decision_footer, usd
-from .timeutil import utcnow
+from .timeutil import et_date, et_datetime, to_et, utcnow
 from .tracker import Tracker
 from .uw_client import UWClient
 from .watch_engine import WatchEngine
@@ -41,6 +43,7 @@ logger = logging.getLogger("quiet-alpha.runtime")
 
 LEADER_RETRY_SECONDS = 15
 MAINTENANCE_SECONDS = 30
+DAILY_REPORT_DELAY_MINUTES = 2
 
 
 class AutomationRuntime:
@@ -260,6 +263,34 @@ class AutomationRuntime:
                     except Exception:
                         pass
             await self.publisher.text(f"⌛ Proposal #{proposal['id']} EXPIRED")
+        await self._send_daily_report_if_due()
+
+    async def _send_daily_report_if_due(self) -> None:
+        """Send one report after all of today's trades have closed."""
+        assert self.db is not None and self.publisher is not None
+        now = utcnow()
+        local = to_et(now)
+        if local.weekday() >= 5:
+            return
+        day = et_date(now)
+        report_at = et_datetime(day, self.settings.market.close_et) + timedelta(
+            minutes=DAILY_REPORT_DELAY_MINUTES
+        )
+        if now < report_at:
+            return
+        trades = await self.db.fetch(q.DAILY_TRADES, day)
+        if not trades or any(trade["status"] == "TRACKING" for trade in trades):
+            return
+        text, payload = daily_report_text(
+            trades, day, self.settings.tracking.success_premium_gain
+        )
+        await self.publisher.text_once(
+            "daily",
+            int(day.strftime("%Y%m%d")),
+            "DAILY_REPORT",
+            text,
+            payload=payload,
+        )
 
     # -----------------------------------------------------
     # Owner-only automation commands
@@ -328,6 +359,20 @@ class AutomationRuntime:
         await update.message.reply_text(
             "✅ تم إغلاق المتابعة." if closed else "لا توجد صفقة TRACKING بهذا الرقم."
         )
+
+    async def cmd_daily(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Owner-only preview; does not consume the automatic daily report."""
+        if not await self._guard(update):
+            return
+        day = et_date(utcnow())
+        trades = await self.db.fetch(q.DAILY_TRADES, day)
+        if not trades:
+            await update.message.reply_text("لا توجد صفقات مسجلة اليوم.")
+            return
+        text, _ = daily_report_text(
+            trades, day, self.settings.tracking.success_premium_gain, preview=True
+        )
+        await update.message.reply_html(text)
 
     async def cmd_highest(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not await self._guard(update):
@@ -404,6 +449,7 @@ def setup_automation(application: Application, renderers: CardRenderers) -> Opti
     )
     application.add_handler(CommandHandler("qa_status", runtime.cmd_status))
     application.add_handler(CommandHandler("qa_close", runtime.cmd_close))
+    application.add_handler(CommandHandler("qa_daily", runtime.cmd_daily))
     application.add_handler(CommandHandler("qa_highest", runtime.cmd_highest))
     application.add_handler(CommandHandler("qa_reconcile", runtime.cmd_reconcile))
     application.bot_data["quiet_alpha_runtime"] = runtime
