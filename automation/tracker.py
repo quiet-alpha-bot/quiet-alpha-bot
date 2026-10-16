@@ -5,7 +5,7 @@ Observed Bid = latest nbbo_bid returned by UW at poll time (UW Basic).
 Per poll, for every TRACKING trade:
   * store a price observation
   * update current / highest / lowest (bid), highest mid, highest last
-  * DETECT: every +10% level crossed (and SUCCESS = approved_entry + $1.00)
+  * DETECT: every +10% level crossed (and SUCCESS = approved_entry + $0.50)
     is persisted first, with the Observed Bid of the detecting poll
   * PUBLISH: every detected-but-unsent event in threshold order, e.g.
     +10%, +20%, SUCCESS card, +30% — one ledger key each, sent once,
@@ -48,6 +48,16 @@ logger = logging.getLogger("quiet-alpha.tracker")
 # Milestone / SUCCESS events are retried until Telegram confirms delivery.
 # A FAILED event was definitely not delivered, so retrying cannot duplicate.
 ORDERED_EVENT_MAX_ATTEMPTS = 1_000_000
+
+
+def hard_stop_price(entry: Decimal, loss_pct: Decimal) -> Decimal:
+    """Stop price before SUCCESS (30% below entry by default)."""
+    return entry * (Decimal("1") - loss_pct)
+
+
+def protected_stop_price(entry: Decimal, buffer: Decimal) -> Decimal:
+    """Capital-protection stop after SUCCESS ($0.20 below entry by default)."""
+    return max(Decimal("0"), entry - buffer)
 
 
 def label_for(trade) -> str:
@@ -138,6 +148,8 @@ class Tracker:
             return None
         logger.info("Trade #%s closed (%s)", trade_id, reason)
         await self.refresh_message(trade_id, closed_reason=reason)
+        if reason == "STOP_LOSS_30" and self.s.flags.stop_loss_card:
+            await self.send_stop_loss_card(closed)
         if (
             self.s.flags.highest_card
             and self.s.tracking.highest_card_trigger == "on_close"
@@ -147,6 +159,8 @@ class Tracker:
 
     async def send_highest_card(self, trade) -> Optional[int]:
         """Existing Highest Price card (same renderer as /max). Once per trade."""
+        if trade["success_detected_at"] is None:
+            return None  # highest card is only for trades that achieved +$50
         entry = Decimal(trade["approved_entry"])
         highest = trade["highest_bid"]
         if highest is None or Decimal(highest) <= entry:
@@ -157,6 +171,21 @@ class Tracker:
             "HIGHEST_CARD",
             lambda: self.renderers.highest_card(entry, Decimal(highest)),
             payload={"highest_bid": str(highest), "time": str(trade["highest_bid_time"])},
+        )
+
+    async def send_stop_loss_card(self, trade) -> Optional[int]:
+        """30% stop-loss card. Sent once and only before SUCCESS."""
+        entry = Decimal(trade["approved_entry"])
+        return await self.publisher.photo_once(
+            "trade",
+            trade["id"],
+            "STOP_LOSS_CARD",
+            lambda: self.renderers.stop_loss_card(entry),
+            payload={
+                "entry": str(entry),
+                "observed_bid": str(trade["current_bid"]),
+                "stop_loss_pct": str(self.s.tracking.stop_loss_pct),
+            },
         )
 
     async def _event_done(self, trade_id: int, event_type: str, level: int) -> bool:
@@ -229,9 +258,10 @@ class Tracker:
                 event = run[-1]
                 bid = event.bid if event.bid is not None else trade["current_bid"]
                 start_level = run[0].level if len(run) > 1 else None
+                approval_time = trade.get("approval_time")
                 elapsed_seconds = (
-                    (utcnow() - trade["approval_time"]).total_seconds()
-                    if trade["approval_time"] is not None
+                    (utcnow() - approval_time).total_seconds()
+                    if approval_time is not None
                     else None
                 )
                 await self.publisher.text_once(
@@ -436,16 +466,24 @@ class Tracker:
         if await self.flush_events(trade_id):
             significant = True
 
-        # Close only after at least one profit milestone was reached and
-        # the executable bid later falls below the approved entry. Closing
-        # here lets HIGHEST_CARD_TRIGGER=on_close publish the trade's peak.
-        if (
-            quote.bid is not None
-            and int(trade["highest_milestone_reached"] or 0) > 0
-            and quote.bid < entry
-        ):
-            await self.close(trade_id, "FELL_BELOW_ENTRY")
-            return
+        # ---- 3) INDEPENDENT PROTECTION FOR THIS TRADE ----------------
+        # Re-read after success detection because the `trade` argument is the
+        # snapshot from before this quote was processed.
+        latest_trade = await self.db.fetchrow(q.GET_TRADE, trade_id)
+        if quote.bid is not None and latest_trade is not None:
+            success_achieved = latest_trade["success_detected_at"] is not None
+            if not success_achieved:
+                stop = hard_stop_price(entry, self.s.tracking.stop_loss_pct)
+                if quote.bid <= stop:
+                    await self.close(trade_id, "STOP_LOSS_30")
+                    return
+            else:
+                stop = protected_stop_price(
+                    entry, self.s.tracking.protected_stop_buffer
+                )
+                if quote.bid <= stop:
+                    await self.close(trade_id, "PROTECTED_STOP")
+                    return
 
         # ---- live tracking message ----------------------------------
         if not self.s.flags.tracking:
@@ -461,4 +499,4 @@ class Tracker:
             await self.refresh_message(trade_id)
 
 
-__all__ = ["Tracker", "strike_text"]
+__all__ = ["Tracker", "hard_stop_price", "protected_stop_price", "strike_text"]
