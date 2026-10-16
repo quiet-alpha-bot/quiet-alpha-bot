@@ -273,9 +273,12 @@ TRACKING_TRADES = "SELECT * FROM trades WHERE status = 'TRACKING' ORDER BY id"
 RECENT_TRADES = "SELECT * FROM trades ORDER BY id DESC LIMIT $1"
 
 DAILY_TRADES = """
-SELECT * FROM trades
-WHERE (approval_time AT TIME ZONE 'America/New_York')::date = $1
-ORDER BY approval_time, id
+SELECT t.* FROM trades AS t
+JOIN proposals AS p ON p.id = t.proposal_id
+WHERE (t.approval_time AT TIME ZONE 'America/New_York')::date = $1
+  AND p.status = 'APPROVED'
+  AND t.status IN ('TRACKING', 'CLOSED')
+ORDER BY t.approval_time, t.id
 """
 
 UPDATE_TRADE_QUOTE = """
