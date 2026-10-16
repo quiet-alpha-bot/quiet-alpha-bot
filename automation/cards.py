@@ -71,6 +71,11 @@ class CardRenderers:
             highest_price=self.format_premium(str(highest)),
         )
 
+    def stop_loss_card(self, entry: Decimal) -> BytesIO:
+        return self.create_stop_loss_card(
+            entry_price=self.format_premium(str(entry)),
+        )
+
 
 class Publisher:
     def __init__(self, bot: Bot, chat_id: str, db: Database) -> None:
