@@ -91,7 +91,6 @@ def daily_report_text(
         "",
         f"📈 مجموع إجمالي الربح: ${money(summary['positive'])}",
         f"📉 مجموع إجمالي الخسارة: {'-' if summary['negative'] < 0 else ''}${money(abs(summary['negative']))}",
-        f"💰 صافي الربح: <b>{'-' if summary['net'] < 0 else ''}${money(abs(summary['net']))}</b>",
         f"💰 صافي الربح: <b>{'-' if summary['net'] < 0 else ''}${money(abs(summary['net']))}</b>"
         f" ≈ <b>{'-' if summary['net'] < 0 else ''}{money(abs(summary['net']) * Decimal('3.75'))} ر.س</b>",
     ]
@@ -115,11 +114,6 @@ def daily_report_text(
         if len(trades) > 30:
             lines.append(f"… و{len(trades) - 30} صفقات أخرى")
 
-    lines.extend([
-        "",
-        f"<i>التصنيف يعتمد على أعلى سعر تم تحقيقه: النجاح يبدأ من +${money(success_dollars)}.</i>",
-    ])
-    lines.append("<i>الربح من أعلى سعر مرصود، والخسارة من سعر إغلاق التتبع؛ لكل عقد ×100.</i>")
     if summary["missing_close_prices"]:
         lines.append(f"⚠️ {summary['missing_close_prices']} صفقة مغلقة بلا سعر إغلاق؛ خسائرها غير مكتملة.")
     payload = {key: str(value) for key, value in summary.items() if key != "results"}
