@@ -304,3 +304,23 @@ def signal_status_text(direction: str, status: str, reason: Optional[str], signa
         + (f"{escape(reason)}\n" if reason else "")
         + f"<code>{escape(signal_id)}</code>"
     )
+
+
+def breakeven_exit_text(trade) -> str:
+    entry = Decimal(trade["approved_entry"])
+    exit_bid = Decimal(trade["current_bid"])
+    low = Decimal(trade["lowest_bid"])
+    drawdown = (entry - low) / entry * Decimal("100")
+    result = (exit_bid - entry) * Decimal("100")
+    side = "🟢" if trade["direction"] == "CALL" else "🔴"
+    outcome = "$0.00 — دون خسارة" if result == 0 else f"+${money(result)} — دون خسارة"
+    return (
+        "\u200f🦋 <b>QUIET ALPHA — خروج على رأس المال</b>\n\n"
+        f"\u200f{side} <b>{escape(str(trade['strike']))} {trade['direction']}</b>\n"
+        f"\u200fسعر الدخول: <b>${money(entry)}</b>\n"
+        f"\u200fسعر الخروج المرصود: <b>${money(exit_bid)}</b>\n"
+        f"\u200fالنتيجة: <b>{outcome}</b>\n\n"
+        f"\u200fعاد العقد إلى سعر الدخول بعد تراجع بلغ <b>{drawdown.quantize(Decimal('0.1'))}%</b>، "
+        "دون تحقيق هدف <b>+$50</b>.\n\n"
+        "\u200fنرصد فرصة جديدة عند تجدد شروط الدخول."
+    )
