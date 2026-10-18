@@ -159,6 +159,30 @@ class ApprovalHandler:
             return
 
         current = quote.ask  # buy-side price used for entry
+        if s.flags.flow_selection and current > s.selection.premium_max:
+            replacement_id = await rt.pipeline.propose_alternative(proposal)
+            if replacement_id is not None:
+                if query.message is not None:
+                    await query.edit_message_reply_markup(reply_markup=None)
+                await rt.publisher.text("تجاوز العقد نطاق الطرح؛ نبحث عن بديل قوي بنفس الاتجاه، ويتطلب موافقة جديدة.")
+                await rt._schedule_signal(replacement_id)
+            else:
+                await rt.db.execute(q.REVERT_APPROVAL, proposal_id)
+                await rt.publisher.text("لا يمكن اعتماد العقد فوق الحد الأعلى؛ لم يتأكد بديل مناسب وزخم مستمر.")
+            return
+        if s.flags.flow_selection:
+            from .models import Direction
+            from .selection import select_with_flow
+            signal = await rt.db.fetchrow(q.GET_SIGNAL, proposal["signal_db_id"])
+            snapshot = await rt.pipeline._confirmed_flow(signal)
+            selection = None if snapshot is None else select_with_flow(
+                [quote], Direction(proposal["direction"]), proposal["expiry"],
+                s.uw.contract_root, s.selection, utcnow(), snapshot,
+            )
+            if selection is None or selection.selected is None:
+                await rt.db.execute(q.REVERT_APPROVAL, proposal_id)
+                await rt.publisher.text("لم تعد شروط الاتجاه والتدفقات وجودة السعر مكتملة؛ لم تُعتمد الصفقة.")
+                return
         in_range = s.selection.premium_min <= current <= s.selection.premium_max
         tolerance_ok = within_tolerance(
             reference, current, s.approval.tolerance_abs, s.approval.tolerance_pct
