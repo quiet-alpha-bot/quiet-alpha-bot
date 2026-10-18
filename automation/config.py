@@ -130,6 +130,9 @@ class Flags:
     success_card: bool
     highest_card: bool
     stop_loss_card: bool
+    liquidity_radar: bool = False
+    flow_selection: bool = False
+    breakeven_exit: bool = False
 
     @classmethod
     def from_env(cls) -> "Flags":
@@ -145,6 +148,9 @@ class Flags:
             success_card=env_bool("SUCCESS_CARD_ENABLED"),
             highest_card=env_bool("HIGHEST_CARD_ENABLED"),
             stop_loss_card=env_bool("STOP_LOSS_CARD_ENABLED"),
+            liquidity_radar=env_bool("LIQUIDITY_RADAR_ENABLED"),
+            flow_selection=env_bool("FLOW_SELECTION_ENABLED"),
+            breakeven_exit=env_bool("BREAKEVEN_EXIT_ENABLED"),
         )
 
 
@@ -206,6 +212,10 @@ class SelectionSettings:
     weight_distance: Decimal
     delta_target_abs: Decimal
     top_n_reported: int
+    flow_window_minutes: int = 10
+    flow_max_pages: int = 20
+    alternative_attempts: int = 2
+    momentum_max_age_seconds: int = 300
 
 
 @dataclass(frozen=True)
@@ -238,7 +248,7 @@ class TrackingSettings:
     milestone_step_pct: int
     # Approved rule: SUCCESS = approved_entry + $0.50 (+$50 gross/contract).
     success_premium_gain: Decimal
-    # Before SUCCESS: close at entry minus 30%.
+    # Before SUCCESS: close at entry minus 50%.
     stop_loss_pct: Decimal
     # After SUCCESS: protect capital at entry minus $0.20 premium.
     protected_stop_buffer: Decimal
@@ -249,6 +259,8 @@ class TrackingSettings:
     # send) is moved to NEEDS_RECONCILIATION. Must exceed the longest send
     # (photo timeouts total 240s), so the default 600s never races a live send.
     pending_stale_seconds: int = 600
+    breakeven_drawdown_pct: Decimal = Decimal("0.35")
+    group_milestones: bool = True
 
 
 @dataclass(frozen=True)
@@ -301,6 +313,8 @@ class Settings:
             self.flags.uw_watch
             or self.flags.selection
             or self.flags.tracking
+            or self.flags.liquidity_radar
+            or self.flags.flow_selection
         )
         if uw_needed and not self.uw_api_key:
             issues.append("UW_API_KEY is missing")
@@ -359,8 +373,8 @@ def load_settings() -> Settings:
     )
 
     selection = SelectionSettings(
-        premium_min=env_decimal("PREMIUM_MIN", "2.50"),
-        premium_max=env_decimal("PREMIUM_MAX", "4.00"),
+        premium_min=env_decimal("PREMIUM_MIN", "1.00"),
+        premium_max=env_decimal("PREMIUM_MAX", "4.50"),
         max_spread_abs=env_decimal("MAX_SPREAD_ABS", None),
         max_spread_pct=env_decimal("MAX_SPREAD_PCT", None),
         min_volume=env_int("MIN_VOLUME", None),
@@ -377,6 +391,10 @@ def load_settings() -> Settings:
         weight_distance=env_decimal("W_DISTANCE", "0"),
         delta_target_abs=env_decimal("DELTA_TARGET_ABS", "0.30"),
         top_n_reported=env_int("TOP_N_REPORTED", 3) or 3,
+        flow_window_minutes=max(1, env_int("FLOW_WINDOW_MINUTES", 10) or 10),
+        flow_max_pages=max(1, env_int("FLOW_MAX_PAGES", 20) or 20),
+        alternative_attempts=max(0, env_int("ALTERNATIVE_ATTEMPTS", 2) or 0),
+        momentum_max_age_seconds=max(30, env_int("MOMENTUM_MAX_AGE_SECONDS", 300) or 300),
     )
 
     entry = EntrySettings(
@@ -398,11 +416,12 @@ def load_settings() -> Settings:
     )
 
     tracking = TrackingSettings(
+        group_milestones=env_bool("MILESTONES_GROUPED", True),
         poll_seconds=env_int("TRACKING_POLL_SECONDS", 1) or 1,
         message_refresh_seconds=env_int("TRACKING_MESSAGE_REFRESH_SECONDS", 60) or 0,
         milestone_step_pct=env_int("MILESTONE_STEP_PCT", 10) or 10,
         success_premium_gain=env_decimal("SUCCESS_PREMIUM_GAIN", "0.50"),
-        stop_loss_pct=env_decimal("STOP_LOSS_PCT", "0.30"),
+        stop_loss_pct=env_decimal("STOP_LOSS_PCT", "0.50"),
         protected_stop_buffer=env_decimal("PROTECTED_STOP_BUFFER", "0.20"),
         stop_time_et=env_time("TRACKING_STOP_TIME_ET", "16:00"),
         highest_card_trigger=(env_str("HIGHEST_CARD_TRIGGER", "none") or "none").lower(),
