@@ -60,6 +60,14 @@ def protected_stop_price(entry: Decimal, buffer: Decimal) -> Decimal:
     return max(Decimal("0"), entry - buffer)
 
 
+def breakeven_ready(entry, bid, lowest, highest, gain, drawdown) -> bool:
+    """Strictly more than drawdown; never fabricate a flat exit price."""
+    return (entry > 0 and bid is not None and lowest is not None
+            and highest is not None and bid >= entry
+            and highest < entry + gain
+            and lowest < entry * (Decimal("1") - drawdown))
+
+
 def label_for(trade) -> str:
     return contract_label(Decimal(trade["strike"]), trade["direction"])
 
@@ -148,6 +156,9 @@ class Tracker:
             return None
         logger.info("Trade #%s closed (%s)", trade_id, reason)
         await self.refresh_message(trade_id, closed_reason=reason)
+        if reason == "BREAKEVEN_EXIT":
+            await self.send_breakeven_exit(closed)
+            return closed
         if reason in {"STOP_LOSS_30", "STOP_LOSS_50"} and self.s.flags.stop_loss_card:
             await self.send_stop_loss_card(closed)
         if (
@@ -156,6 +167,16 @@ class Tracker:
         ):
             await self.send_highest_card(closed)
         return closed
+
+    async def send_breakeven_exit(self, trade) -> Optional[int]:
+        from .telegram_ui import breakeven_exit_text
+        return await self.publisher.text_once(
+            "trade", trade["id"], "BREAKEVEN_EXIT", breakeven_exit_text(trade),
+            payload={"entry": str(trade["approved_entry"]),
+                     "exit_bid": str(trade["current_bid"]),
+                     "lowest_bid": str(trade["lowest_bid"])},
+            max_attempts=ORDERED_EVENT_MAX_ATTEMPTS,
+        )
 
     async def send_highest_card(self, trade) -> Optional[int]:
         """Existing Highest Price card (same renderer as /max). Once per trade."""
@@ -250,8 +271,13 @@ class Tracker:
                 # notification for each consecutive milestone run so users do
                 # not receive many messages with the same observed bid.
                 run = [event]
+                pending_group = (await self.db.fetchrow(q.PENDING_ORDERED_MILESTONE, trade_id)
+                                 if self.s.tracking.group_milestones else None)
+                group_end = pending_group["level"] if pending_group else None
                 while (
-                    index + len(run) < len(events)
+                    self.s.tracking.group_milestones
+                    and index + len(run) < len(events)
+                    and (group_end is None or events[index + len(run)].level <= group_end)
                     and events[index + len(run)].kind == "MILESTONE"
                 ):
                     run.append(events[index + len(run)])
@@ -352,6 +378,9 @@ class Tracker:
 
     async def tick(self) -> None:
         await self.recover_stale_pending()
+        if self.s.flags.breakeven_exit:
+            for closed in await self.db.fetch(q.UNSENT_BREAKEVEN_EXITS):
+                await self.send_breakeven_exit(closed)
         trades = await self.db.fetch(q.TRACKING_TRADES)
         self.last_tick_at = utcnow()
         if not trades:
@@ -472,6 +501,14 @@ class Tracker:
         latest_trade = await self.db.fetchrow(q.GET_TRADE, trade_id)
         if quote.bid is not None and latest_trade is not None:
             success_achieved = latest_trade["success_detected_at"] is not None
+            if (self.s.flags.breakeven_exit and not success_achieved
+                and quote.last_tape_time is not None
+                and 0 <= (now - quote.last_tape_time).total_seconds() <= 120
+                and breakeven_ready(entry, quote.bid, state.lowest_bid,
+                                    state.highest_bid, gain,
+                                    self.s.tracking.breakeven_drawdown_pct)):
+                await self.close(trade_id, "BREAKEVEN_EXIT")
+                return
             if not success_achieved:
                 stop = hard_stop_price(entry, self.s.tracking.stop_loss_pct)
                 if quote.bid <= stop:
