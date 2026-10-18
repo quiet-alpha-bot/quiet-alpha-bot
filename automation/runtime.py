@@ -32,6 +32,8 @@ from .config import Settings, load_settings
 from .db import Database, LeaderLock
 from .daily_report import daily_report_text
 from .pipeline import SignalPipeline
+from .liquidity import LiquidityService
+from .radar import LiquidityRadar, radar_text
 from .telegram_ui import decision_footer, usd
 from .timeutil import et_date, et_datetime, to_et, utcnow
 from .tracker import Tracker
@@ -60,6 +62,8 @@ class AutomationRuntime:
         self.pipeline: Optional[SignalPipeline] = None
         self.tracker: Optional[Tracker] = None
         self.watch: Optional[WatchEngine] = None
+        self.liquidity = None
+        self.radar = None
         self.webhook: Optional[WebhookServer] = None
         self.approval = ApprovalHandler(self)
         self._tasks: set[asyncio.Task] = set()
@@ -98,7 +102,7 @@ class AutomationRuntime:
         # switched off (fail closed) instead of half-running.
         off: dict[str, bool] = {}
         if not s.uw_api_key:
-            for name in ("uw_watch", "selection", "tracking"):
+            for name in ("uw_watch", "selection", "tracking", "liquidity_radar", "flow_selection"):
                 if getattr(s.flags, name):
                     off[name] = False
                     self.disabled.append(f"{name}: UW_API_KEY missing")
@@ -116,7 +120,10 @@ class AutomationRuntime:
             self.uw = UWClient(s.uw_api_key, s.uw)
             await self.uw.start()
 
-        self.pipeline = SignalPipeline(s, self.db, self.uw, self.publisher)
+        if self.uw is not None:
+            self.liquidity = LiquidityService(self.uw, s.selection.flow_max_pages)
+            self.radar = LiquidityRadar(s, self.db, self.publisher, self.liquidity)
+        self.pipeline = SignalPipeline(s, self.db, self.uw, self.publisher, self.liquidity)
         self.tracker = Tracker(s, self.db, self.uw, self.publisher, self.renderers)
         if self.uw is not None:
             self.watch = WatchEngine(s, self.db, self.uw, self.publisher)
@@ -213,6 +220,8 @@ class AutomationRuntime:
                 asyncio.create_task(self._maintenance_loop(), name="qa-maintenance")
             ]
             f = self.settings.flags
+            if f.liquidity_radar and self.radar is not None:
+                self._leader_children.append(asyncio.create_task(self.radar.run(), name="qa-radar"))
             if f.uw_watch and self.watch is not None:
                 self._leader_children.append(
                     asyncio.create_task(self.watch.run(), name="qa-watch")
@@ -338,6 +347,10 @@ class AutomationRuntime:
                 ))
         if self.tracker and self.tracker.last_error:
             lines.append(f"Tracker last error: {self.tracker.last_error}")
+        if self.liquidity and self.liquidity.last_error:
+            lines.append(f"Liquidity data: {self.liquidity.last_error}")
+        if self.radar and self.radar.last_error:
+            lines.append(f"Radar data: {self.radar.last_error}")
         if self.watch and self.watch.last_error:
             lines.append(f"Watch last error: {self.watch.last_error}")
         for warning in self.disabled:
@@ -386,6 +399,48 @@ class AutomationRuntime:
             trades, day, self.settings.tracking.success_premium_gain, preview=True
         )
         await update.message.reply_html(text)
+
+    async def cmd_liquidity_check(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not await self._guard(update):
+            return
+        if self.uw is None:
+            await update.message.reply_text("UW غير متصل.")
+            return
+        from .uw_client import UWError
+        try:
+            response = await self.uw.get("/api/option-trades", {
+                "ticker_symbol": "SPX", "min_dte": 0, "max_dte": 0, "limit": 1,
+            })
+        except UWError as error:
+            await update.message.reply_text(
+                f"تعذر التحقق من بيانات التدفقات: {error.kind}. "
+                "لا يُفعّل اختيار السيولة قبل التأكد من صلاحية هذا المصدر في اشتراك UW."
+            )
+            return
+        await update.message.reply_text(
+            "✅ مصدر التدفقات متاح للاشتراك. "
+            "يظل فحص اكتمال وحداثة البيانات مطلوبًا أثناء الجلسة."
+        )
+
+    async def cmd_radar(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not await self._guard(update):
+            return
+        if self.liquidity is None:
+            await update.message.reply_text("بيانات UW غير متاحة.")
+            return
+        now = utcnow()
+        from .timeutil import within_session
+        if to_et(now).weekday() >= 5 or not within_session(now, self.settings.market.open_et, self.settings.market.close_et):
+            await update.message.reply_text("المعاينة الحية متاحة أثناء جلسة السوق فقط؛ لا نعرض جلسة قديمة كقراءة اليوم.")
+            return
+        opened = et_datetime(et_date(now), self.settings.market.open_et)
+        end = now.replace(second=0, microsecond=0)
+        start = max(opened, end - timedelta(hours=1))
+        snapshot = await self.liquidity.snapshot(start, end)
+        if not snapshot.fresh(now):
+            await update.message.reply_text("بانتظار تدفقات مكتملة وحديثة. " + (snapshot.reason or "NO_FRESH_DATA"))
+            return
+        await update.message.reply_html(radar_text(snapshot, now, start == opened))
 
     async def cmd_highest(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not await self._guard(update):
@@ -463,6 +518,8 @@ def setup_automation(application: Application, renderers: CardRenderers) -> Opti
     application.add_handler(CommandHandler("qa_status", runtime.cmd_status))
     application.add_handler(CommandHandler("qa_close", runtime.cmd_close))
     application.add_handler(CommandHandler("qa_daily", runtime.cmd_daily))
+    application.add_handler(CommandHandler("qa_radar", runtime.cmd_radar))
+    application.add_handler(CommandHandler("qa_liquidity_check", runtime.cmd_liquidity_check))
     application.add_handler(CommandHandler("qa_highest", runtime.cmd_highest))
     application.add_handler(CommandHandler("qa_reconcile", runtime.cmd_reconcile))
     application.bot_data["quiet_alpha_runtime"] = runtime
