@@ -401,3 +401,43 @@ SELECT event_type, level, status, created_at FROM events
 WHERE entity_type = 'trade' AND entity_id = $1
 ORDER BY created_at, level
 """
+
+# Closed rows keep their observed exit quote and release the directional slot.
+# Delivery retries survive a restart; ambiguous events remain owner-reconciled.
+UNSENT_BREAKEVEN_EXITS = """
+SELECT t.* FROM trades t
+LEFT JOIN events e ON e.entity_type = 'trade' AND e.entity_id = t.id
+    AND e.event_type = 'BREAKEVEN_EXIT' AND e.level = 0
+WHERE t.status = 'CLOSED' AND t.close_reason = 'BREAKEVEN_EXIT'
+  AND (e.id IS NULL OR e.status = 'FAILED')
+ORDER BY t.closed_at LIMIT 50
+"""
+LATEST_DIRECTION_SIGNAL = """
+SELECT * FROM signals WHERE signal_time >= $1 AND signal_time <= $2
+AND ticker IS NOT DISTINCT FROM $3
+ORDER BY signal_time DESC, id DESC LIMIT 1
+"""
+
+GET_RADAR_REPORT = "SELECT * FROM liquidity_radar_reports WHERE market_date = $1 AND slot = $2"
+SAVE_RADAR_REPORT = """
+INSERT INTO liquidity_radar_reports (market_date, slot, message_text)
+VALUES ($1, $2, $3)
+ON CONFLICT (market_date, slot) DO UPDATE
+SET message_text = liquidity_radar_reports.message_text
+RETURNING *
+"""
+
+CANCEL_OVERPRICED_PROPOSAL = """
+UPDATE proposals SET status = 'CANCELLED', approving_from = NULL,
+    approving_since = NULL, decided_at = now(),
+    decision_note = 'OVERPRICED_REPLACEMENT', updated_at = now()
+WHERE id = $1 AND status = 'APPROVING'
+RETURNING id
+"""
+
+PENDING_ORDERED_MILESTONE = """
+SELECT level FROM events
+WHERE entity_type = 'trade' AND entity_id = $1 AND event_type = 'MILESTONE'
+  AND status <> 'SENT'
+ORDER BY level LIMIT 1
+"""
