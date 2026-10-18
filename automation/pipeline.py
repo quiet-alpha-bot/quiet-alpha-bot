@@ -5,8 +5,9 @@ signal -> classification (INDICATOR_ONLY / BOTH_CONFIRMED / CONFLICT)
        -> entry selection (ENTER / WAIT / SKIP)
        -> private trade proposal (APPROVE / REJECT)
 
-A UW watch is never required: without one the signal is INDICATOR_ONLY
-and continues normally.
+With FLOW_SELECTION_ENABLED off, a UW watch is not required. With the
+new mode on, current single-leg buying flow and a fresh, aligned indicator
+are required for both original and alternative proposals.
 """
 
 from __future__ import annotations
@@ -31,7 +32,7 @@ from .models import (
     SignalStatus,
     WatchStatus,
 )
-from .selection import select_contract, selection_reasons
+from .selection import select_contract, selection_reasons, select_with_flow
 from .telegram_ui import compact_usd, proposal_keyboard, proposal_text, signal_status_text
 from .timeutil import et_date, utcnow, within_session
 from .uw_client import UWClient, UWError
@@ -103,11 +104,13 @@ class SignalPipeline:
         db: Database,
         uw: Optional[UWClient],
         publisher: Publisher,
+        liquidity=None,
     ) -> None:
         self.s = settings
         self.db = db
         self.uw = uw
         self.publisher = publisher
+        self.liquidity = liquidity
 
     # -----------------------------------------------------
     async def process(self, signal_db_id: int) -> None:
@@ -241,15 +244,20 @@ class SignalPipeline:
         if self.s.selection.weight_distance > 0:
             spot = await self.uw.spot(self.s.uw.spot_ticker)
 
-        selection = select_contract(
-            quotes,
-            direction,
-            expiry,
-            self.s.uw.contract_root,
-            self.s.selection,
-            utcnow(),
-            spot,
-        )
+        excluded = set(self._signal_payload(row).get("excluded_symbols", []))
+        quotes = [quote for quote in quotes if quote.symbol not in excluded]
+        if self.s.flags.flow_selection:
+            snapshot = await self._confirmed_flow(row)
+            if snapshot is None:
+                await self._finish(row, SignalStatus.SKIPPED, "MOMENTUM_OR_FLOW_UNCONFIRMED")
+                await self._finish_run(run_id, "SKIPPED", "MOMENTUM_OR_FLOW_UNCONFIRMED",
+                                       ticker, expiry, spot, [], None, meta)
+                return
+            selection = select_with_flow(quotes, direction, expiry, self.s.uw.contract_root,
+                                         self.s.selection, utcnow(), snapshot, spot)
+        else:
+            selection = select_contract(quotes, direction, expiry, self.s.uw.contract_root,
+                                        self.s.selection, utcnow(), spot)
         await self._store_candidates(run_id, selection.candidates)
 
         if selection.selected is None:
@@ -260,15 +268,52 @@ class SignalPipeline:
             return
 
         chosen = selection.selected.quote
-        entry_result, latest, pre_proposal_high = await self._entry_loop(
-            run_id, chosen, signal_time
-        )
-        if entry_result.decision is not EntryDecision.ENTER:
-            await self._finish_run(run_id, "SKIPPED", entry_result.reason, ticker, expiry,
-                                   spot, selection.candidates, chosen.symbol, meta)
-            await self._finish(row, SignalStatus.SKIPPED, entry_result.reason)
-            return
+        attempts = 0
+        while True:
+            entry_result, latest, pre_proposal_high = await self._entry_loop(
+                run_id, chosen, signal_time
+            )
+            if entry_result.decision is EntryDecision.ENTER:
+                break
+            overpriced = latest is not None and latest.ask is not None and latest.ask > self.s.selection.premium_max
+            if not (self.s.flags.flow_selection and overpriced
+                    and attempts < self.s.selection.alternative_attempts):
+                await self._finish_run(run_id, "SKIPPED", entry_result.reason, ticker, expiry,
+                                       spot, selection.candidates, chosen.symbol, meta)
+                await self._finish(row, SignalStatus.SKIPPED, entry_result.reason)
+                return
+            attempts += 1
+            excluded.add(chosen.symbol)
+            snapshot = await self._confirmed_flow(row)
+            if snapshot is None:
+                await self._finish(row, SignalStatus.SKIPPED, "ALTERNATIVE_MOMENTUM_LOST")
+                await self._finish_run(run_id, "SKIPPED", "ALTERNATIVE_MOMENTUM_LOST",
+                                       ticker, expiry, spot, [], None, meta)
+                return
+            ticker, fresh_quotes, meta = await self.uw.chain(direction, expiry)
+            selection = select_with_flow(
+                [qt for qt in fresh_quotes if qt.symbol not in excluded], direction, expiry,
+                self.s.uw.contract_root, self.s.selection, utcnow(), snapshot, spot,
+            )
+            await self._store_candidates(run_id, selection.candidates)
+            if selection.selected is None:
+                await self._finish(row, SignalStatus.NO_CONTRACT, "NO_STRONG_ALTERNATIVE")
+                await self._finish_run(run_id, "NO_CONTRACT", "NO_STRONG_ALTERNATIVE",
+                                       ticker, expiry, spot, selection.candidates, None, meta)
+                return
+            chosen = selection.selected.quote
 
+        if self.s.flags.flow_selection:
+            snapshot = await self._confirmed_flow(row)
+            verification = None if snapshot is None else select_with_flow(
+                [latest], direction, expiry, self.s.uw.contract_root,
+                self.s.selection, utcnow(), snapshot, spot,
+            )
+            if verification is None or verification.selected is None:
+                await self._finish_run(run_id, "SKIPPED", "PRE_PROPOSAL_RECHECK_FAILED", ticker,
+                                       expiry, spot, selection.candidates, chosen.symbol, meta)
+                await self._finish(row, SignalStatus.SKIPPED, "PRE_PROPOSAL_RECHECK_FAILED")
+                return
         suggested = entry_result.price
         await self._finish_run(run_id, "SELECTED", entry_result.reason, ticker, expiry,
                                spot, selection.candidates, chosen.symbol, meta)
@@ -282,6 +327,10 @@ class SignalPipeline:
             return
 
         reasons = selection_reasons(selection)
+        if self.s.flags.flow_selection:
+            reasons.insert(0, "الأقوى حسب صافي تدفقات الشراء الحديثة بين العقود المؤهلة")
+            if attempts or self._signal_payload(row).get("alternative_count"):
+                reasons.insert(0, "استرايك بديل بعد تجاوز العقد السابق نطاق الطرح")
         tv_strength, uw_strength, composite_strength, uw_aligned = _proposal_strengths(
             row, result, watch_rows
         )
@@ -361,13 +410,71 @@ class SignalPipeline:
             await self.db.execute(q.SET_PROPOSAL_MESSAGE, proposal["id"], message_id)
         await self._finish(row, SignalStatus.PROPOSED, f"proposal #{proposal['id']}")
 
+    @staticmethod
+    def _signal_payload(row):
+        payload = row["payload"]
+        if isinstance(payload, str):
+            payload = json.loads(payload)
+        return payload if isinstance(payload, dict) else {}
+
+    async def _confirmed_flow(self, row):
+        if self.liquidity is None:
+            return None
+        now = utcnow()
+        age = (now - row["signal_time"]).total_seconds()
+        if age < 0 or age > self.s.selection.momentum_max_age_seconds:
+            return None
+        latest = await self.db.fetchrow(q.LATEST_DIRECTION_SIGNAL,
+            now - timedelta(seconds=self.s.selection.momentum_max_age_seconds), now, row["ticker"])
+        if latest is None or latest["direction"] != row["direction"]:
+            return None
+        strength = _payload_strength(latest)
+        if strength is None or strength < Decimal("65"):
+            return None
+        snapshot = await self.liquidity.recent(self.s.selection.flow_window_minutes)
+        now = utcnow()
+        if (now - row["signal_time"]).total_seconds() > self.s.selection.momentum_max_age_seconds or not snapshot.fresh(now):
+            return None
+        net_call = sum((f.net_buy for f in snapshot.contracts.values() if f.direction == "CALL"), Decimal(0))
+        net_put = sum((f.net_buy for f in snapshot.contracts.values() if f.direction == "PUT"), Decimal(0))
+        directional = net_call - net_put
+        if (row["direction"] == "CALL" and directional <= 0
+            or row["direction"] == "PUT" and directional >= 0):
+            return None
+        return snapshot
+
+    async def propose_alternative(self, proposal):
+        """A new proposal requires a NEW owner approval; old buttons cannot approve it."""
+        row = await self.db.fetchrow(q.GET_SIGNAL, proposal["signal_db_id"])
+        payload = dict(self._signal_payload(row))
+        count = int(payload.get("alternative_count", 0))
+        if count >= self.s.selection.alternative_attempts or await self._confirmed_flow(row) is None:
+            return None
+        payload["alternative_count"] = count + 1
+        payload["excluded_symbols"] = list(set(payload.get("excluded_symbols", [])) | {proposal["option_symbol"]})
+        ident = f"{row['signal_id']}:alternative"
+        assert self.db.pool is not None
+        async with self.db.pool.acquire() as conn:
+            async with conn.transaction():
+                if await conn.fetchval(q.CANCEL_OVERPRICED_PROPOSAL, proposal["id"]) is None:
+                    return None
+                signal_id = await conn.fetchval(q.INSERT_SIGNAL, ident, "alternative",
+                    row["direction"], row["event_type"], row["ticker"], row["timeframe"],
+                    row["tv_price"], row["signal_time"], payload)
+        return signal_id
+
     # -----------------------------------------------------
     async def _entry_loop(self, run_id: int, chosen, signal_time):
         e = self.s.entry
         first_ask = chosen.ask
         window_start = utcnow()
-        history = [EntryObservation(window_start, chosen.bid, chosen.ask)]
         latest_quote = chosen
+        if self.s.flags.flow_selection:
+            quotes, _ = await self.uw.quotes_for([chosen.symbol])
+            latest_quote = quotes.get(chosen.symbol)
+        history = [EntryObservation(window_start,
+                    latest_quote.bid if latest_quote else None,
+                    latest_quote.ask if latest_quote else None)]
         max_rounds = (e.window_seconds // max(1, e.poll_seconds)) + 3
 
         for _ in range(max_rounds):
