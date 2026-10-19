@@ -448,7 +448,11 @@ class SignalPipeline:
             return reject_flow("قيمة strength غير موجودة أو غير صالحة في تنبيه المؤشر")
         if strength < Decimal("65"):
             return reject_flow(f"قوة المؤشر {strength}% أقل من الحد الحالي 65%")
-        snapshot = await self.liquidity.recent(self.s.selection.flow_window_minutes)
+        snapshot = await self.liquidity.recent(
+            self.s.selection.flow_window_minutes,
+            premium_min=self.s.selection.premium_min,
+            premium_max=self.s.selection.premium_max,
+        )
         now = utcnow()
         age = (now - row["signal_time"]).total_seconds()
         if age > self.s.selection.momentum_max_age_seconds:
@@ -462,7 +466,7 @@ class SignalPipeline:
             return reject_flow(f"تدفقات UW غير حديثة: آخر تنفيذ قبل {lag} ثانية")
         net_call = sum((f.net_buy for f in snapshot.contracts.values() if f.direction == "CALL"), Decimal(0))
         net_put = sum((f.net_buy for f in snapshot.contracts.values() if f.direction == "PUT"), Decimal(0))
-        directional = net_call - net_put
+        directional = snapshot.market_directional if snapshot.market_directional is not None else net_call - net_put
         if (row["direction"] == "CALL" and directional <= 0
             or row["direction"] == "PUT" and directional >= 0):
             return reject_flow(f"ميل التدفقات لا يؤكد {row['direction']}: صافي CALL={net_call}، صافي PUT={net_put}")
