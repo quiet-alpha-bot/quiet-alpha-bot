@@ -13,7 +13,7 @@ from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import Optional
 
-from .models import dec, parse_ts, to_int
+from .models import dec, parse_ts, to_int, Direction
 from .occ import parse_occ
 from .timeutil import et_date, utcnow
 from .uw_client import UWError
@@ -47,6 +47,7 @@ class FlowSnapshot:
     complete: bool
     fetched_at: datetime
     reason: Optional[str] = None
+    market_directional: Optional[Decimal] = None
 
     @property
     def latest_at(self):
@@ -116,11 +117,11 @@ class LiquidityService:
         self._lock = asyncio.Lock()
         self.last_error = None
 
-    async def snapshot(self, start: datetime, end: datetime, single_leg: bool = False) -> FlowSnapshot:
+    async def snapshot(self, start: datetime, end: datetime, single_leg: bool = False, symbols=None) -> FlowSnapshot:
         # Cache key keeps interval endpoints: no leakage between hourly windows.
         if end <= start:
             return FlowSnapshot(start, end, {}, True, utcnow(), "WAITING_FOR_OPENING_PRINTS")
-        key = (start, end, single_leg)
+        key = (start, end, single_leg, tuple(sorted(symbols or [])))
         async with self._lock:
             cached = self._cache.get(key)
             if cached and (utcnow() - cached.fetched_at).total_seconds() < 60:
@@ -135,6 +136,8 @@ class LiquidityService:
                         "limit": 500, "newer_than": start.isoformat(),
                         "older_than": cursor.isoformat(), "canceled": "false",
                     }
+                    if symbols:
+                        params["option_contracts[]"] = list(symbols)
                     if single_leg:
                         params["is_multi_leg"] = "false"
                     response = await self.uw.get("/api/option-trades", params)
@@ -162,6 +165,11 @@ class LiquidityService:
                     reason = "PAGE_LIMIT_REACHED"
             except UWError as error:
                 reason = f"UW_{error.kind.upper()}"
+            if symbols:
+                allowed = set(symbols)
+                unexpected = any((r.get("option_chain_id") or r.get("option_symbol")) not in allowed for r in rows)
+                if unexpected:
+                    complete, reason = False, "CONTRACT_FILTER_NOT_APPLIED"
             result = aggregate_prints(rows, start, end)
             result.complete = result.complete and complete
             result.reason = reason or result.reason
@@ -171,10 +179,59 @@ class LiquidityService:
             self._cache[key] = result
             return result
 
-    async def recent(self, minutes: int = 10):
+    async def recent(self, minutes: int = 10, premium_min=Decimal("1"), premium_max=Decimal("4.50")):
+        """Selection windows cover ALL price-eligible 0DTE contracts, in small
+        server-filtered groups. Broad market direction comes independently
+        from UW net-premium ticks, not from the restricted candidate set.
+        """
+        from .watch_logic import evaluate_flow
         now = utcnow()
         end = now.replace(second=0, microsecond=0)
-        return await self.snapshot(end - timedelta(minutes=minutes), end, single_leg=True)
+        start = end - timedelta(minutes=minutes)
+        key = ("selection", start, end, str(premium_min), str(premium_max))
+        cached = self._cache.get(key)
+        if cached and (now - cached.fetched_at).total_seconds() < 60:
+            return cached
+        try:
+            eligible = set()
+            for direction in (Direction.CALL, Direction.PUT):
+                ticker, quotes, meta = await self.uw.chain(direction, et_date(now))
+                # Chain pagination is bounded too. Do not silently rank an
+                # unknown fraction when the chain itself hits its page cap.
+                pages = meta.get("pages", 0)
+                if len(quotes) >= 500 * self.uw._settings.chain_max_pages:
+                    return FlowSnapshot(start, end, {}, False, utcnow(), "CHAIN_PAGE_LIMIT_REACHED")
+                for quote in quotes:
+                    if (quote.occ.root == "SPXW" and quote.occ.expiry == et_date(now)
+                        and quote.ask is not None and premium_min <= quote.ask <= premium_max
+                        and quote.bid is not None and 0 < quote.bid <= quote.ask):
+                        eligible.add(quote.symbol)
+            if not eligible:
+                return FlowSnapshot(start, end, {}, True, utcnow(), "NO_PRICE_ELIGIBLE_CONTRACTS")
+            if len(eligible) > 200:
+                return FlowSnapshot(start, end, {}, False, utcnow(), "CANDIDATE_REQUEST_BUDGET")
+            combined = {}
+            for offset in range(0, len(eligible), 5):
+                symbols = sorted(eligible)[offset:offset+5]
+                part = await self.snapshot(start, end, single_leg=True, symbols=symbols)
+                if not part.complete:
+                    return part  # never use partial evidence for ranking
+                combined.update(part.contracts)
+            ticks = await self.uw.net_prem_ticks("SPX")
+            now = utcnow()
+            market = evaluate_flow(ticks, now, minutes, Decimal("0"), Decimal("0"))
+            latest_tick = max((parse_ts(r.get("tape_time")) for r in ticks
+                               if parse_ts(r.get("tape_time")) is not None), default=None)
+            if latest_tick is None or not 0 <= (now-latest_tick).total_seconds() <= 120:
+                return FlowSnapshot(start, end, combined, False, utcnow(), "MARKET_DIRECTION_STALE")
+            result = FlowSnapshot(start, end, combined, True, utcnow(),
+                                  market_directional=market.directional_premium)
+            self._cache[key] = result
+            self.last_error = None
+            return result
+        except UWError as error:
+            self.last_error = f"UW_{error.kind.upper()}"
+            return FlowSnapshot(start, end, {}, False, utcnow(), self.last_error)
 
 
 def eligible_flow(flow, now, max_age=120):
