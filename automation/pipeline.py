@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from contextvars import ContextVar
 from datetime import timedelta
 from decimal import Decimal, InvalidOperation
 from typing import Optional
@@ -38,6 +39,14 @@ from .timeutil import et_date, utcnow, within_session
 from .uw_client import UWClient, UWError
 
 logger = logging.getLogger("quiet-alpha.pipeline")
+# Context-local so simultaneous CALL/PUT signals cannot overwrite diagnostics.
+flow_rejection_reason = ContextVar("flow_rejection_reason", default="سبب غير محدد")
+
+
+def reject_flow(reason):
+    flow_rejection_reason.set(reason)
+    logger.warning("Flow confirmation rejected: %s", reason)
+    return None
 
 
 def _seconds(value: Optional[float]) -> Optional[Decimal]:
@@ -249,8 +258,9 @@ class SignalPipeline:
         if self.s.flags.flow_selection:
             snapshot = await self._confirmed_flow(row)
             if snapshot is None:
-                await self._finish(row, SignalStatus.SKIPPED, "MOMENTUM_OR_FLOW_UNCONFIRMED")
-                await self._finish_run(run_id, "SKIPPED", "MOMENTUM_OR_FLOW_UNCONFIRMED",
+                reason = "MOMENTUM_OR_FLOW_UNCONFIRMED — " + flow_rejection_reason.get()
+                await self._finish(row, SignalStatus.SKIPPED, reason)
+                await self._finish_run(run_id, "SKIPPED", reason,
                                        ticker, expiry, spot, [], None, meta)
                 return
             selection = select_with_flow(quotes, direction, expiry, self.s.uw.contract_root,
@@ -418,29 +428,44 @@ class SignalPipeline:
         return payload if isinstance(payload, dict) else {}
 
     async def _confirmed_flow(self, row):
+        flow_rejection_reason.set("سبب غير محدد")
         if self.liquidity is None:
-            return None
+            return reject_flow("مصدر التدفقات غير متصل")
         now = utcnow()
         age = (now - row["signal_time"]).total_seconds()
-        if age < 0 or age > self.s.selection.momentum_max_age_seconds:
-            return None
+        if age < 0:
+            return reject_flow("وقت الإشارة في المستقبل؛ يلزم مراجعة التوقيت")
+        if age > self.s.selection.momentum_max_age_seconds:
+            return reject_flow(f"الإشارة قديمة: {int(age)} ثانية")
         latest = await self.db.fetchrow(q.LATEST_DIRECTION_SIGNAL,
             now - timedelta(seconds=self.s.selection.momentum_max_age_seconds), now, row["ticker"])
-        if latest is None or latest["direction"] != row["direction"]:
-            return None
+        if latest is None:
+            return reject_flow("لا توجد إشارة مؤشر حديثة لنفس الرمز")
+        if latest["direction"] != row["direction"]:
+            return reject_flow(f"آخر إشارة مؤشر أصبحت {latest['direction']} بدل {row['direction']}")
         strength = _payload_strength(latest)
-        if strength is None or strength < Decimal("65"):
-            return None
+        if strength is None:
+            return reject_flow("قيمة strength غير موجودة أو غير صالحة في تنبيه المؤشر")
+        if strength < Decimal("65"):
+            return reject_flow(f"قوة المؤشر {strength}% أقل من الحد الحالي 65%")
         snapshot = await self.liquidity.recent(self.s.selection.flow_window_minutes)
         now = utcnow()
-        if (now - row["signal_time"]).total_seconds() > self.s.selection.momentum_max_age_seconds or not snapshot.fresh(now):
-            return None
+        age = (now - row["signal_time"]).total_seconds()
+        if age > self.s.selection.momentum_max_age_seconds:
+            return reject_flow(f"انتهت صلاحية الإشارة أثناء انتظار UW: {int(age)} ثانية")
+        if not snapshot.complete:
+            return reject_flow("بيانات UW غير مكتملة: " + (snapshot.reason or "UNKNOWN"))
+        if snapshot.latest_at is None:
+            return reject_flow("لا توجد تداولات مؤهلة لعقود اليوم في نافذة الرصد")
+        if not snapshot.fresh(now):
+            lag = int((now - snapshot.latest_at).total_seconds())
+            return reject_flow(f"تدفقات UW غير حديثة: آخر تنفيذ قبل {lag} ثانية")
         net_call = sum((f.net_buy for f in snapshot.contracts.values() if f.direction == "CALL"), Decimal(0))
         net_put = sum((f.net_buy for f in snapshot.contracts.values() if f.direction == "PUT"), Decimal(0))
         directional = net_call - net_put
         if (row["direction"] == "CALL" and directional <= 0
             or row["direction"] == "PUT" and directional >= 0):
-            return None
+            return reject_flow(f"ميل التدفقات لا يؤكد {row['direction']}: صافي CALL={net_call}، صافي PUT={net_put}")
         return snapshot
 
     async def propose_alternative(self, proposal):
