@@ -436,11 +436,12 @@ class AutomationRuntime:
         opened = et_datetime(et_date(now), self.settings.market.open_et)
         end = now.replace(second=0, microsecond=0)
         start = max(opened, end - timedelta(hours=1))
-        snapshot = await self.liquidity.snapshot(start, end)
-        if not snapshot.fresh(now):
+        snapshot = await self.liquidity.radar_snapshot(start, end)
+        observed_at = utcnow()
+        if not snapshot.fresh(observed_at, max_age=180):
             await update.message.reply_text("بانتظار تدفقات مكتملة وحديثة. " + (snapshot.reason or "NO_FRESH_DATA"))
             return
-        await update.message.reply_html(radar_text(snapshot, now, start == opened))
+        await update.message.reply_html(radar_text(snapshot, observed_at, start == opened))
 
     async def cmd_highest(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not await self._guard(update):
