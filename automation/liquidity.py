@@ -48,6 +48,8 @@ class FlowSnapshot:
     fetched_at: datetime
     reason: Optional[str] = None
     market_directional: Optional[Decimal] = None
+    market_strength: Optional[Decimal] = None
+    indicator_strength: Optional[Decimal] = None
 
     @property
     def latest_at(self):
@@ -179,6 +181,81 @@ class LiquidityService:
             self._cache[key] = result
             return result
 
+    async def radar_snapshot(self, start, end):
+        """Complete per-contract minute aggregates for 0DTE, with no price
+        restriction. Avoid paginating an hour of individual exchange prints.
+        Source: /api/option-contract/{id}/intraday?date=YYYY-MM-DD.
+        """
+        if end <= start:
+            return FlowSnapshot(start, end, {}, True, utcnow(), "WAITING_FOR_OPENING_PRINTS")
+        key = ("radar_minutes", start, end)
+        cached = self._cache.get(key)
+        if cached and (utcnow()-cached.fetched_at).total_seconds() < 60:
+            return cached
+        try:
+            contracts = {}
+            day = et_date(end)
+            for direction in (Direction.CALL, Direction.PUT):
+                _, quotes, meta = await self.uw.chain(direction, day)
+                if len(quotes) >= 500 * self.uw._settings.chain_max_pages:
+                    return FlowSnapshot(start,end,{},False,utcnow(),"RADAR_CHAIN_PAGE_LIMIT")
+                for quote in quotes:
+                    if (quote.occ.root == "SPXW" and quote.occ.expiry == day
+                        and (quote.volume is None or quote.volume > 0)):
+                        contracts[quote.symbol] = quote
+            if len(contracts) > 600:
+                return FlowSnapshot(start,end,{},False,utcnow(),"RADAR_CONTRACT_BUDGET")
+            semaphore = asyncio.Semaphore(4)
+            async def read(quote):
+                async with semaphore:
+                    response = await self.uw.get(f"/api/option-contract/{quote.symbol}/intraday",
+                                                 {"date": day.isoformat()})
+                rows = self.uw._rows(response.data)
+                # Accommodate the documented minute schema's nested data.
+                if len(rows)==1 and isinstance(rows[0].get("data"),list):
+                    rows=rows[0]["data"]
+                flow = ContractFlow(quote.symbol,quote.occ.strike,quote.occ.right)
+                seen=set()
+                for row in rows:
+                    if not isinstance(row,dict):
+                        raise ValueError("INVALID_MINUTE_ROW")
+                    symbol=row.get("option_symbol")
+                    if symbol is not None and symbol!=quote.symbol:
+                        raise ValueError("MINUTE_SYMBOL_MISMATCH")
+                    at=parse_ts(row.get("start_time"))
+                    if at is None:
+                        raise ValueError("MISSING_MINUTE_TIME")
+                    if not start <= at < end or at in seen:
+                        continue
+                    seen.add(at)
+                    premiums=[dec(row.get("premium_"+side+"_side")) for side in ("ask","bid","mid","no")]
+                    volumes=[to_int(row.get("volume_"+side+"_side")) for side in ("ask","bid","mid","no")]
+                    if any(v is None or v<0 for v in premiums+volumes):
+                        raise ValueError("MISSING_MINUTE_VALUES")
+                    flow.premium+=sum(premiums,ZERO)
+                    flow.ask_premium+=premiums[0]
+                    flow.bid_premium+=premiums[1]
+                    flow.volume+=sum(volumes)
+                    if sum(volumes)>0:
+                        flow.last_at=max(flow.last_at or at,min(at+timedelta(minutes=1),end))
+                        flow.active_minutes.add(at)
+                return flow
+            outcomes=await asyncio.gather(*(read(q) for q in contracts.values()),return_exceptions=True)
+            failures=[v for v in outcomes if isinstance(v,BaseException)]
+            if failures:
+                error=failures[0]
+                reason=f"UW_{error.kind.upper()}" if isinstance(error,UWError) else str(error)
+                self.last_error="RADAR_"+reason
+                return FlowSnapshot(start,end,{},False,utcnow(),self.last_error)
+            flows={v.symbol:v for v in outcomes if v.volume>0}
+            result=FlowSnapshot(start,end,flows,True,utcnow())
+            self._cache[key]=result
+            self.last_error=None
+            return result
+        except UWError as error:
+            self.last_error=f"RADAR_UW_{error.kind.upper()}"
+            return FlowSnapshot(start,end,{},False,utcnow(),self.last_error)
+
     async def recent(self, minutes: int = 10, premium_min=Decimal("1"), premium_max=Decimal("4.50")):
         """Selection windows cover ALL price-eligible 0DTE contracts, in small
         server-filtered groups. Broad market direction comes independently
@@ -219,13 +296,16 @@ class LiquidityService:
                 combined.update(part.contracts)
             ticks = await self.uw.net_prem_ticks("SPX")
             now = utcnow()
-            market = evaluate_flow(ticks, now, minutes, Decimal("0"), Decimal("0"))
+            ticks = [r for r in ticks if parse_ts(r.get("tape_time")) is not None
+                     and start <= parse_ts(r.get("tape_time")) < end]
+            market = evaluate_flow(ticks, end, minutes, Decimal("0"), Decimal("0"))
             latest_tick = max((parse_ts(r.get("tape_time")) for r in ticks
                                if parse_ts(r.get("tape_time")) is not None), default=None)
             if latest_tick is None or not 0 <= (now-latest_tick).total_seconds() <= 120:
                 return FlowSnapshot(start, end, combined, False, utcnow(), "MARKET_DIRECTION_STALE")
             result = FlowSnapshot(start, end, combined, True, utcnow(),
-                                  market_directional=market.directional_premium)
+                                  market_directional=market.directional_premium,
+                                  market_strength=market.strength)
             self._cache[key] = result
             self.last_error = None
             return result
