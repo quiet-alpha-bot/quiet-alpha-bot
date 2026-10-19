@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from datetime import timedelta
 from decimal import Decimal
 from html import escape
@@ -11,6 +12,8 @@ from . import queries as q
 from .models import money
 from .occ import strike_text
 from .timeutil import et_date, et_datetime, to_et, utcnow
+
+logger = logging.getLogger("quiet-alpha.radar")
 
 RTL = "\u200f"
 SA = ZoneInfo("Asia/Riyadh")
@@ -94,10 +97,8 @@ def report_slot(now, market):
         return None
     slot = int((now - opened).total_seconds() // 3600)
     due = opened + timedelta(hours=slot)
-    # No backfill of old hourly publications after a long outage. A late
-    # opening can become a live opening read for up to ten minutes.
-    if now > due + timedelta(minutes=10):
-        return None
+    # Only the current slot is eligible, but it remains retryable throughout
+    # its hour. A restart after minute ten must not silence the radar.
     return et_date(now), slot, due, opened
 
 
@@ -105,6 +106,7 @@ class LiquidityRadar:
     def __init__(self, settings, db, publisher, liquidity):
         self.s, self.db, self.publisher, self.liquidity = settings, db, publisher, liquidity
         self.last_error = None
+        self._retry_after = None
 
     async def run(self):
         while True:
@@ -114,16 +116,20 @@ class LiquidityRadar:
                 raise
             except Exception as error:
                 self.last_error = type(error).__name__
+                logger.exception("Liquidity radar tick failed")
             await asyncio.sleep(30)
 
     async def build(self, now, slot, due, opened):
-        end = now.replace(second=0, microsecond=0) if slot == 0 else due
-        start = opened if slot == 0 else due - timedelta(hours=1)
-        snapshot = await self.liquidity.snapshot(start, end)
-        if not snapshot.fresh(now, max_age=180 if slot == 0 else 600):
+        # On a delayed retry use the most recent rolling hour, not an old
+        # fixed window that can no longer satisfy the freshness guard.
+        end = now.replace(second=0, microsecond=0)
+        start = max(opened, end - timedelta(hours=1))
+        snapshot = await self.liquidity.radar_snapshot(start, end)
+        observed_at = utcnow()
+        if not snapshot.fresh(observed_at, max_age=180):
             self.last_error = snapshot.reason or "WAITING_FOR_FRESH_SESSION_DATA"
             return None
-        return radar_text(snapshot, now, slot == 0)
+        return radar_text(snapshot, observed_at, slot == 0)
 
     async def tick(self):
         now = utcnow()
@@ -136,7 +142,13 @@ class LiquidityRadar:
         if event and event["status"] not in ("FAILED",):
             return
         saved = await self.db.fetchrow(q.GET_RADAR_REPORT, day, slot)
-        text = saved["message_text"] if saved else await self.build(now, slot, due, opened)
+        if saved is None:
+            if self._retry_after is not None and now < self._retry_after:
+                return
+            text = await self.build(now, slot, due, opened)
+            self._retry_after = utcnow() + timedelta(seconds=60)
+        else:
+            text = saved["message_text"]
         if text is None:
             header = radar_header(now, slot == 0)
             wait = "\n".join(RTL + l if l else "" for l in header)
