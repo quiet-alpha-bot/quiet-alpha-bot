@@ -469,7 +469,13 @@ class SignalPipeline:
         directional = snapshot.market_directional if snapshot.market_directional is not None else net_call - net_put
         if (row["direction"] == "CALL" and directional <= 0
             or row["direction"] == "PUT" and directional >= 0):
-            return reject_flow(f"ميل التدفقات لا يؤكد {row['direction']}: صافي CALL={net_call}، صافي PUT={net_put}")
+            scope = "UW العام" if snapshot.market_directional is not None else "عقود النطاق المرشحة"
+            bias = "CALL" if directional > 0 else ("PUT" if directional < 0 else "محايد")
+            return reject_flow(
+                f"اتجاه {scope} خلال {self.s.selection.flow_window_minutes} دقائق: {bias} "
+                f"(الصافي الاتجاهي {directional:+.2f} دولار)، لا يؤكد {row['direction']}. "
+                f"للمقارنة فقط، صافي عقود النطاق: CALL={net_call}، PUT={net_put}"
+            )
         return snapshot
 
     async def propose_alternative(self, proposal):
