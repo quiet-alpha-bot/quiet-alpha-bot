@@ -59,20 +59,24 @@ class CardRenderers:
             premium=self.format_premium(str(entry)),
         )
 
-    def success_card(self, entry: Decimal, exit_price: Decimal) -> BytesIO:
+    def success_card(self, entry: Decimal, exit_price: Decimal, option_symbol: str = "") -> BytesIO:
         return self.create_success_card(
             entry_price=self.format_premium(str(entry)),
             exit_price=self.format_premium(str(exit_price)),
+            option_symbol=option_symbol,
         )
 
-    def highest_card(self, entry: Decimal, highest: Decimal) -> BytesIO:
+    def highest_card(self, entry: Decimal, highest: Decimal, option_symbol: str = "") -> BytesIO:
         return self.create_highest_price_card(
             entry_price=self.format_premium(str(entry)),
             highest_price=self.format_premium(str(highest)),
+            option_symbol=option_symbol,
         )
 
-    def stop_loss_card(self, entry: Decimal) -> BytesIO:
+    def stop_loss_card(self, entry: Decimal, exit_price: Optional[Decimal] = None, option_symbol: str = "") -> BytesIO:
         return self.create_stop_loss_card(
+            exit_price=None if exit_price is None else self.format_premium(str(exit_price)),
+            option_symbol=option_symbol,
             entry_price=self.format_premium(str(entry)),
         )
 
