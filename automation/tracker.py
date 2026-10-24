@@ -190,7 +190,7 @@ class Tracker:
             "trade",
             trade["id"],
             "HIGHEST_CARD",
-            lambda: self.renderers.highest_card(entry, Decimal(highest)),
+            lambda: self.renderers.highest_card(entry, Decimal(highest), trade["option_symbol"]),
             payload={"highest_bid": str(highest), "time": str(trade["highest_bid_time"])},
         )
 
@@ -201,7 +201,7 @@ class Tracker:
             "trade",
             trade["id"],
             "STOP_LOSS_CARD",
-            lambda: self.renderers.stop_loss_card(entry),
+            lambda: self.renderers.stop_loss_card(entry, trade["current_bid"], trade["option_symbol"]),
             payload={
                 "entry": str(entry),
                 "observed_bid": str(trade["current_bid"]),
@@ -311,7 +311,7 @@ class Tracker:
             else:
                 await self.publisher.photo_once(
                     "trade", trade_id, "SUCCESS_CARD",
-                    lambda: self.renderers.success_card(entry, Decimal(bid)),
+                    lambda: self.renderers.success_card(entry, Decimal(bid), trade["option_symbol"]),
                     payload={"observed_bid": str(bid), "threshold": str(event.threshold)},
                     max_attempts=ORDERED_EVENT_MAX_ATTEMPTS,
                 )
