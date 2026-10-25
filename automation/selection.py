@@ -232,6 +232,7 @@ def select_contract(
     settings: SelectionSettings,
     now: datetime,
     spot: Optional[Decimal] = None,
+    excluded_strikes=(),
 ) -> SelectionResult:
     candidates = [
         Candidate(
@@ -240,6 +241,10 @@ def select_contract(
         )
         for q in quotes
     ]
+    blocked = set(excluded_strikes)
+    for candidate in candidates:
+        if candidate.quote.occ.strike in blocked:
+            candidate.reject_reasons.append("STRIKE_ALREADY_OPEN")
     passed = [c for c in candidates if c.passed]
     rank_candidates(passed, settings, now, spot)
     selected = passed[0] if passed else None
@@ -264,7 +269,7 @@ def selection_reasons(result: SelectionResult) -> list[str]:
     return reasons
 
 
-def select_with_flow(quotes, direction, expiry, root, settings, now, snapshot, spot=None):
+def select_with_flow(quotes, direction, expiry, root, settings, now, snapshot, spot=None, excluded_strikes=()):
     """Identical hard gates for original/alternative; strongest verified buy flow first."""
     from dataclasses import replace
     from .liquidity import eligible_flow
@@ -274,7 +279,7 @@ def select_with_flow(quotes, direction, expiry, root, settings, now, snapshot, s
         max_spread_pct=settings.max_spread_pct if settings.max_spread_pct is not None else Decimal("0.15"),
         max_tape_age_seconds=settings.max_tape_age_seconds if settings.max_tape_age_seconds is not None else 120,
     )
-    result = select_contract(quotes, direction, expiry, root, quality, now, spot)
+    result = select_contract(quotes, direction, expiry, root, quality, now, spot, excluded_strikes=excluded_strikes)
     for cand in result.candidates:
         flow = snapshot.contracts.get(cand.quote.symbol)
         if not snapshot.fresh(now) or not eligible_flow(flow, now):
