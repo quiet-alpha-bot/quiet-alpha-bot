@@ -796,9 +796,11 @@ async def publish_success_card(
     context: ContextTypes.DEFAULT_TYPE,
     entry_price: str,
     exit_price: str,
+    contract_name: str = "",
 ) -> None:
 
     card = create_success_card(
+        contract_name=contract_name,
         entry_price=entry_price,
         exit_price=exit_price,
     )
@@ -817,9 +819,11 @@ async def publish_highest_price_card(
     context: ContextTypes.DEFAULT_TYPE,
     entry_price: str,
     highest_price: str,
+    contract_name: str = "",
 ) -> None:
 
     card = create_highest_price_card(
+        contract_name=contract_name,
         entry_price=entry_price,
         highest_price=highest_price,
     )
@@ -837,9 +841,11 @@ async def publish_highest_price_card(
 async def publish_stop_loss_card(
     context: ContextTypes.DEFAULT_TYPE,
     entry_price: str,
+    contract_name: str = "",
 ) -> None:
 
     card = create_stop_loss_card(
+        contract_name=contract_name,
         entry_price=entry_price,
     )
 
@@ -1025,6 +1031,40 @@ async def put_command(
 # أمر /win
 # =========================================================
 
+def manual_card_args(args, price_count):
+    """Legacy prices, or ROOT STRIKE CALL/PUT followed by prices.
+
+    Identity is for rendering only; this does not register a tracked trade.
+    """
+    from decimal import Decimal, InvalidOperation
+    import re
+    if len(args) == price_count:
+        price_args, label = args, ""
+    elif len(args) == price_count + 3:
+        root, raw_strike, direction = args[0].upper(), args[1], args[2].upper()
+        if not re.fullmatch(r"[A-Z]{1,6}", root) or direction not in {"CALL", "PUT"}:
+            raise ValueError("Invalid contract identity")
+        try:
+            strike = Decimal(raw_strike)
+        except InvalidOperation as exc:
+            raise ValueError("Invalid strike") from exc
+        if not strike.is_finite() or not 0 < strike < 100000 or strike*1000 != (strike*1000).to_integral_value():
+            raise ValueError("Invalid strike")
+        strike_label = format(strike, 'f').rstrip('0').rstrip('.') if '.' in format(strike, 'f') else str(strike)
+        label = f"{root} · {strike_label} {direction}"
+        price_args = args[3:]
+    else:
+        raise ValueError("Invalid argument count")
+    for raw in price_args:
+        try:
+            value = Decimal(raw)
+        except InvalidOperation as exc:
+            raise ValueError("Invalid price") from exc
+        if not value.is_finite() or value <= 0:
+            raise ValueError("Invalid price")
+    return price_args, label
+
+
 async def win_command(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
@@ -1036,22 +1076,23 @@ async def win_command(
     if not await ensure_owner(update):
         return
 
-    if len(context.args) != 2:
+    if len(context.args) not in (2, 5):
         await update.message.reply_text(
             "❌ الاستخدام الصحيح:\n\n"
-            "/win 3.90 4.90\n\n"
-            "الرقم الأول: سعر الدخول\n"
-            "الرقم الثاني: السعر المحقق"
+            "/win SPXW 7770 CALL 3.10 3.60\n\n"
+            "الترتيب: الأصل، الاسترايك، CALL أو PUT، سعر الدخول\n"
+            "ثم سعر تحقيق الهدف"
         )
         return
 
     try:
+        price_args, contract_name = manual_card_args(context.args, 2)
         entry_price = format_premium(
-            context.args[0]
+            price_args[0]
         )
 
         exit_price = format_premium(
-            context.args[1]
+            price_args[1]
         )
 
         if (
@@ -1065,6 +1106,7 @@ async def win_command(
             return
 
         await publish_success_card(
+            contract_name=contract_name,
             context=context,
             entry_price=entry_price,
             exit_price=exit_price,
@@ -1076,8 +1118,8 @@ async def win_command(
 
     except (ValueError, TypeError):
         await update.message.reply_text(
-            "❌ سعر الدخول والسعر المحقق "
-            "يجب أن يكونا أرقامًا صحيحة."
+            "❌ تأكدي من بيانات العقد والأسعار؛ "
+            "الأسعار موجبة والنوع CALL أو PUT."
         )
 
     except FileNotFoundError as error:
@@ -1086,7 +1128,7 @@ async def win_command(
         )
 
         await update.message.reply_text(
-            "❌ لم أجد ملف success_card.jpg.\n"
+            "❌ لم أجد ملف qa_success_v2.png.\n"
             f"{error}"
         )
 
@@ -1116,22 +1158,23 @@ async def max_command(
     if not await ensure_owner(update):
         return
 
-    if len(context.args) != 2:
+    if len(context.args) not in (2, 5):
         await update.message.reply_text(
             "❌ الاستخدام الصحيح:\n\n"
-            "/max 3.90 8.40\n\n"
-            "الرقم الأول: سعر الدخول\n"
-            "الرقم الثاني: أعلى سعر"
+            "/max SPXW 7770 CALL 3.10 5.20\n\n"
+            "الترتيب: الأصل، الاسترايك، CALL أو PUT، سعر الدخول\n"
+            "ثم أعلى سعر"
         )
         return
 
     try:
+        price_args, contract_name = manual_card_args(context.args, 2)
         entry_price = format_premium(
-            context.args[0]
+            price_args[0]
         )
 
         highest_price = format_premium(
-            context.args[1]
+            price_args[1]
         )
 
         if (
@@ -1145,6 +1188,7 @@ async def max_command(
             return
 
         await publish_highest_price_card(
+            contract_name=contract_name,
             context=context,
             entry_price=entry_price,
             highest_price=highest_price,
@@ -1167,10 +1211,10 @@ async def max_command(
 
     except (ValueError, TypeError):
         await update.message.reply_text(
-            "❌ سعر الدخول وأعلى سعر "
-            "يجب أن يكونا أرقامًا صحيحة.\n\n"
+            "❌ تأكدي من بيانات العقد والأسعار؛ "
+            "الأسعار موجبة والنوع CALL أو PUT.\n\n"
             "مثال:\n"
-            "/max 3.90 8.40"
+            "/max SPXW 7770 CALL 3.10 5.20"
         )
 
     except FileNotFoundError as error:
@@ -1180,7 +1224,7 @@ async def max_command(
 
         await update.message.reply_text(
             "❌ لم أجد ملف "
-            "highest_price_card.jpg.\n"
+            "qa_highest_v2.png.\n"
             f"{error}"
         )
 
@@ -1197,7 +1241,7 @@ async def max_command(
 
 # =========================================================
 # أمر /stop
-# /stop 3.90
+# /stop SPXW 7700 PUT 4.00
 # =========================================================
 
 async def stop_command(
@@ -1211,17 +1255,18 @@ async def stop_command(
     if not await ensure_owner(update):
         return
 
-    if len(context.args) != 1:
+    if len(context.args) not in (1, 4):
         await update.message.reply_text(
             "❌ الاستخدام الصحيح:\n\n"
-            "/stop 3.90\n\n"
-            "اكتبي سعر الدخول فقط."
+            "/stop SPXW 7700 PUT 4.00\n\n"
+            "الترتيب: الأصل، الاسترايك، CALL أو PUT، سعر الدخول."
         )
         return
 
     try:
+        price_args, contract_name = manual_card_args(context.args, 1)
         entry_price = format_premium(
-            context.args[0]
+            price_args[0]
         )
 
         loss_value = calculate_stop_loss(
@@ -1229,6 +1274,7 @@ async def stop_command(
         )
 
         await publish_stop_loss_card(
+            contract_name=contract_name,
             context=context,
             entry_price=entry_price,
         )
@@ -1242,10 +1288,10 @@ async def stop_command(
 
     except (ValueError, TypeError):
         await update.message.reply_text(
-            "❌ سعر الدخول يجب أن يكون "
-            "رقمًا صحيحًا.\n\n"
+            "❌ تأكدي من الأصل والاسترايك وCALL أو PUT؛ سعر الدخول "
+            "يجب أن يكون موجبًا.\n\n"
             "مثال:\n"
-            "/stop 3.90"
+            "/stop SPXW 7700 PUT 4.00"
         )
 
     except FileNotFoundError as error:
@@ -1254,7 +1300,7 @@ async def stop_command(
         )
 
         await update.message.reply_text(
-            "❌ لم أجد ملف STOP_LOSS_CARD_50.jpg.\n"
+            "❌ لم أجد ملف qa_stop_v2.png.\n"
             f"{error}"
         )
 
