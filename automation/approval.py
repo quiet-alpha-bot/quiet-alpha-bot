@@ -237,6 +237,7 @@ class ApprovalHandler:
         now = utcnow()
         trade = None
         limit_hit = False
+        strike_busy = False
         assert rt.db.pool is not None
         async with rt.db.pool.acquire() as conn:
             async with conn.transaction():
@@ -244,7 +245,14 @@ class ApprovalHandler:
                 active_count = await conn.fetchval(
                     q.COUNT_TRACKING_DIRECTION, proposal["direction"]
                 )
-                if active_count >= 6:
+                strike_busy = await conn.fetchval(
+                    q.OPEN_DIRECTION_STRIKE_EXISTS,
+                    proposal["direction"], proposal["strike"],
+                )
+                if strike_busy:
+                    # Revert while still holding the same direction lock.
+                    await conn.execute(q.REVERT_APPROVAL, proposal["id"])
+                elif active_count >= 6:
                     limit_hit = True
                 else:
                     finalized = await conn.fetchval(
@@ -272,6 +280,12 @@ class ApprovalHandler:
                             quote.ask,
                             quote.last,
                         )
+        if strike_busy:
+            await rt.publisher.text(
+                f"⚠️ يوجد عقد {proposal['strike']} {proposal['direction']} مفتوح بالفعل.\n"
+                "لم تُفتح صفقة مكررة. يمكن اختيار استرايك آخر، أو إعادة الموافقة بعد إغلاق العقد الحالي وقبل انتهاء صلاحية المقترح."
+            )
+            return
         if limit_hit:
             await rt.db.execute(q.REVERT_APPROVAL, proposal["id"])
             await rt.publisher.text(
