@@ -79,7 +79,7 @@ def draw_field(draw, text, box, color, maximum=80):
               text, font=font, fill=color)
 
 
-def render(kind, values, option_symbol='', date_text=None):
+def render(kind, values, option_symbol='', date_text=None, contract_name=''):
     with Image.open(BASE / f'qa_{kind}_v2.png') as template:
         image = template.convert('RGB')
     draw = ImageDraw.Draw(image)
@@ -87,7 +87,7 @@ def render(kind, values, option_symbol='', date_text=None):
     def field(text, box, color=GOLD, maximum=80):
         scaled = tuple(v*(sx if i % 2 == 0 else sy) for i, v in enumerate(box))
         draw_field(draw, text, scaled, color, int(maximum*sx))
-    field(contract_text(option_symbol), (100,490,1436,620), maximum=90)
+    field(contract_text(option_symbol) if option_symbol else contract_name, (100,490,1436,620), maximum=90)
     if kind == 'highest':
         boxes = [(52,780,386,899),(424,780,750,899),(788,780,1114,899),(1150,780,1485,899)]
     elif kind == 'success':
@@ -108,30 +108,30 @@ def render(kind, values, option_symbol='', date_text=None):
     return result
 
 
-def create_success_card(entry_price, exit_price, option_symbol='', date_text=None):
+def create_success_card(entry_price, exit_price, option_symbol='', date_text=None, contract_name=''):
     entry, target = number(entry_price), number(exit_price)
     if entry <= 0 or target <= entry:
         raise ValueError('Success price must exceed positive entry')
     return render('success', [(profit((target-entry)*100),GREEN),
                               ('$'+amount(target),GOLD),('$'+amount(entry),GOLD)],
-                  option_symbol, date_text)
+                  option_symbol, date_text, contract_name)
 
 
-def create_highest_price_card(entry_price, highest_price, option_symbol='', date_text=None):
+def create_highest_price_card(entry_price, highest_price, option_symbol='', date_text=None, contract_name=''):
     entry, high = number(entry_price), number(highest_price)
     if entry <= 0 or high <= entry:
         raise ValueError('Highest price must exceed positive entry')
     percentage = ((high-entry)/entry*100).quantize(Decimal('.1'), rounding=ROUND_HALF_UP)
     return render('highest', [('$'+amount(entry),WHITE),('$'+amount(high),WHITE),
                               (f'+{percentage}%',GREEN),(profit((high-entry)*100),GREEN)],
-                  option_symbol, date_text)
+                  option_symbol, date_text, contract_name)
 
 
-def create_stop_loss_card(entry_price, exit_price=None, option_symbol='', date_text=None):
+def create_stop_loss_card(entry_price, exit_price=None, option_symbol='', date_text=None, contract_name=''):
     entry = number(entry_price)
     # The legacy manual /stop command represents the configured 50% stop.
     exit_value = entry*Decimal('.5') if exit_price is None else number(exit_price)
     if entry <= 0 or exit_value < 0 or exit_value > entry:
         raise ValueError('Invalid stop price')
     return render('stop', [('$'+amount(entry),WHITE),('$'+amount(exit_value),WHITE),
-                           (profit((exit_value-entry)*100),RED)], option_symbol, date_text)
+                           (profit((exit_value-entry)*100),RED)], option_symbol, date_text, contract_name)
