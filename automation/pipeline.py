@@ -253,6 +253,7 @@ class SignalPipeline:
         if self.s.selection.weight_distance > 0:
             spot = await self.uw.spot(self.s.uw.spot_ticker)
 
+        blocked_strikes = await self._open_strikes(direction)
         excluded = set(self._signal_payload(row).get("excluded_symbols", []))
         quotes = [quote for quote in quotes if quote.symbol not in excluded]
         if self.s.flags.flow_selection:
@@ -264,10 +265,10 @@ class SignalPipeline:
                                        ticker, expiry, spot, [], None, meta)
                 return
             selection = select_with_flow(quotes, direction, expiry, self.s.uw.contract_root,
-                                         self.s.selection, utcnow(), snapshot, spot)
+                                         self.s.selection, utcnow(), snapshot, spot, excluded_strikes=blocked_strikes)
         else:
             selection = select_contract(quotes, direction, expiry, self.s.uw.contract_root,
-                                        self.s.selection, utcnow(), spot)
+                                        self.s.selection, utcnow(), spot, excluded_strikes=blocked_strikes)
         await self._store_candidates(run_id, selection.candidates)
 
         if selection.selected is None:
@@ -301,9 +302,11 @@ class SignalPipeline:
                                        ticker, expiry, spot, [], None, meta)
                 return
             ticker, fresh_quotes, meta = await self.uw.chain(direction, expiry)
+            blocked_strikes = await self._open_strikes(direction)
             selection = select_with_flow(
                 [qt for qt in fresh_quotes if qt.symbol not in excluded], direction, expiry,
                 self.s.uw.contract_root, self.s.selection, utcnow(), snapshot, spot,
+                excluded_strikes=blocked_strikes,
             )
             await self._store_candidates(run_id, selection.candidates)
             if selection.selected is None:
@@ -312,6 +315,12 @@ class SignalPipeline:
                                        ticker, expiry, spot, selection.candidates, None, meta)
                 return
             chosen = selection.selected.quote
+
+        if chosen.occ.strike in await self._open_strikes(direction):
+            await self._finish_run(run_id, "SKIPPED", "STRIKE_ALREADY_OPEN", ticker,
+                                   expiry, spot, selection.candidates, chosen.symbol, meta)
+            await self._finish(row, SignalStatus.SKIPPED, "STRIKE_ALREADY_OPEN")
+            return
 
         if self.s.flags.flow_selection:
             snapshot = await self._confirmed_flow(row)
@@ -556,6 +565,10 @@ class SignalPipeline:
             default=None,
         )
         return final, latest_quote, highest_bid
+
+    async def _open_strikes(self, direction):
+        rows = await self.db.fetch(q.OPEN_DIRECTION_STRIKES, direction.value)
+        return {Decimal(str(row["strike"])) for row in rows}
 
     async def _store_candidates(self, run_id: int, candidates) -> None:
         rows = []
