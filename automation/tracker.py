@@ -68,6 +68,15 @@ def breakeven_ready(entry, bid, lowest, highest, gain, drawdown) -> bool:
             and lowest < entry * (Decimal("1") - drawdown))
 
 
+def breakeven_approach_ready(entry, bid, lowest, highest, gain, drawdown) -> bool:
+    """Warn within 10% below entry after a strict drawdown, before success."""
+    return (entry > 0 and bid is not None and lowest is not None
+            and highest is not None
+            and entry * Decimal("0.90") <= bid < entry
+            and highest < entry + gain
+            and lowest < entry * (Decimal("1") - drawdown))
+
+
 def label_for(trade) -> str:
     return contract_label(Decimal(trade["strike"]), trade["direction"])
 
@@ -175,6 +184,27 @@ class Tracker:
             payload={"entry": str(trade["approved_entry"]),
                      "exit_bid": str(trade["current_bid"]),
                      "lowest_bid": str(trade["lowest_bid"])},
+            max_attempts=ORDERED_EVENT_MAX_ATTEMPTS,
+        )
+
+    async def send_breakeven_approach(self, trade) -> Optional[int]:
+        entry = Decimal(trade["approved_entry"])
+        bid = Decimal(trade["current_bid"])
+        low = Decimal(trade["lowest_bid"])
+        drawdown = (entry - low) / entry * Decimal("100")
+        remaining = (entry - bid) / entry * Decimal("100")
+        text = (
+            "🦋 <b>QUIET ALPHA — اقتراب من رأس المال</b>\n\n"
+            f"<b>{label_for(trade)}</b>\n"
+            f"سعر الدخول: <b>${entry:.2f}</b>\n"
+            f"السعر الحالي: <b>${bid:.2f}</b>\n"
+            f"المتبقي للوصول إلى سعر الدخول: <b>{remaining:.2f}%</b>\n\n"
+            f"تعافى العقد بعد تراجع بلغ <b>{drawdown:.2f}%</b>، "
+            "واقترب من سعر الدخول. استعدوا للخروج عند العودة إلى رأس المال."
+        )
+        return await self.publisher.text_once(
+            "trade", trade["id"], "BREAKEVEN_APPROACH", text,
+            payload={"entry": str(entry), "bid": str(bid), "lowest_bid": str(low)},
             max_attempts=ORDERED_EVENT_MAX_ATTEMPTS,
         )
 
@@ -524,6 +554,18 @@ class Tracker:
                 if quote.bid <= stop:
                     await self.close(trade_id, "PROTECTED_STOP")
                     return
+
+        # A warning never closes the trade. The existing exit/stop paths above
+        # take precedence, including a quote that jumps straight to entry.
+        if (latest_trade is not None and self.s.flags.breakeven_exit
+            and latest_trade["status"] == "TRACKING"
+            and latest_trade["success_detected_at"] is None
+            and quote.last_tape_time is not None
+            and 0 <= (now - quote.last_tape_time).total_seconds() <= 120
+            and breakeven_approach_ready(entry, quote.bid, state.lowest_bid,
+                                        state.highest_bid, gain,
+                                        self.s.tracking.breakeven_drawdown_pct)):
+            await self.send_breakeven_approach(latest_trade)
 
         # ---- live tracking message ----------------------------------
         if not self.s.flags.tracking:
