@@ -15,6 +15,10 @@ RED = '#FF3949'
 WHITE = '#FFF8E6'
 FONT_PATHS = (
     '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf',
+    '/usr/share/fonts/dejavu/DejaVuSans-Bold.ttf',
+    '/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf',
+    '/usr/share/fonts/truetype/freefont/FreeSansBold.ttf',
+    '/usr/share/fonts/truetype/noto/NotoSans-Bold.ttf',
     '/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf',
     '/System/Library/Fonts/Supplemental/Arial Bold.ttf',
 )
@@ -44,15 +48,27 @@ def contract_text(symbol):
     return f'{occ.root} · {strike_text(occ.strike)} {occ.right}'
 
 
+def load_card_font(size):
+    for path in FONT_PATHS:
+        try:
+            return ImageFont.truetype(path, size)
+        except (OSError, ValueError):
+            continue
+    # Pillow >= 10.1 bundles a scalable Aileron font. All dynamic fields
+    # are Latin/numeric; Arabic headings are already in the template.
+    try:
+        return ImageFont.load_default(size=size)
+    except TypeError:
+        # Compatibility with old Pillow builds; do not block publication.
+        return ImageFont.load_default()
+
+
 def draw_field(draw, text, box, color, maximum=80):
     if not text:
         return
-    path = next((p for p in FONT_PATHS if Path(p).exists()), None)
-    if path is None:
-        raise RuntimeError('A TrueType font is required to render result cards')
     left, top, right, bottom = box
     for size in range(maximum, 9, -1):
-        font = ImageFont.truetype(path, size)
+        font = load_card_font(size)
         bounds = draw.textbbox((0, 0), text, font=font)
         w, h = bounds[2]-bounds[0], bounds[3]-bounds[1]
         if w <= right-left-24 and h <= bottom-top-16:
