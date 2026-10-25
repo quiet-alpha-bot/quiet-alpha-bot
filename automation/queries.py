@@ -245,7 +245,7 @@ RETURNING id
 # Trades
 # ---------------------------------------------------------
 # Serialize approvals per direction so two fast button presses cannot exceed
-# the three-open-trades limit.
+# the six-open-trades limit and the open-strike uniqueness check.
 LOCK_TRADE_DIRECTION = """
 SELECT pg_advisory_xact_lock(hashtext('quiet-alpha-trades-' || $1))
 """
@@ -253,6 +253,19 @@ SELECT pg_advisory_xact_lock(hashtext('quiet-alpha-trades-' || $1))
 COUNT_TRACKING_DIRECTION = """
 SELECT count(*) FROM trades
 WHERE status = 'TRACKING' AND direction = $1
+"""
+
+# Only actively tracked trades reserve a strike. Direction is independent.
+OPEN_DIRECTION_STRIKES = """
+SELECT DISTINCT strike FROM trades
+WHERE status = 'TRACKING' AND direction = $1
+"""
+
+OPEN_DIRECTION_STRIKE_EXISTS = """
+SELECT EXISTS (
+    SELECT 1 FROM trades
+    WHERE status = 'TRACKING' AND direction = $1 AND strike = $2
+)
 """
 
 INSERT_TRADE = """
