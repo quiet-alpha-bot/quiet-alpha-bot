@@ -288,8 +288,11 @@ TRACKING_TRADES = "SELECT * FROM trades WHERE status = 'TRACKING' ORDER BY id"
 RECENT_TRADES = "SELECT * FROM trades ORDER BY id DESC LIMIT $1"
 
 DAILY_TRADES = """
-SELECT t.* FROM trades AS t
+SELECT t.*, (e.payload->>'telegram_sent_at')::timestamptz AS published_at
+FROM trades AS t
 JOIN proposals AS p ON p.id = t.proposal_id
+LEFT JOIN events AS e ON e.entity_type = 'trade' AND e.entity_id = t.id
+    AND e.event_type = 'ENTRY_CARD' AND e.level = 0 AND e.status = 'SENT' 
 WHERE (t.approval_time AT TIME ZONE 'America/New_York')::date = $1
   AND p.status = 'APPROVED'
   AND t.status IN ('TRACKING', 'CLOSED')
@@ -477,3 +480,14 @@ WHERE id = $1 AND classification = 'MANUAL' AND status = 'PENDING_APPROVAL'
 RETURNING id
 """
 TRADE_BY_PROPOSAL = "SELECT * FROM trades WHERE proposal_id = $1"
+
+# Telegram's original message timestamp is stored atomically with SENT.
+# Do not replace it during later reconciliation or status changes.
+MARK_SENT_EVENT = """
+UPDATE events SET status = 'SENT', message_id = $2, last_error = NULL,
+    updated_at = now(),
+    payload = CASE WHEN payload ? 'telegram_sent_at' THEN payload
+        ELSE COALESCE(payload, '{}'::jsonb)
+             || jsonb_build_object('telegram_sent_at', $3::timestamptz) END
+WHERE id = $1
+"""
