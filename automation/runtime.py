@@ -27,6 +27,7 @@ from telegram.ext import Application, CallbackQueryHandler, CommandHandler, Cont
 
 from . import queries as q
 from .approval import ApprovalHandler
+from .manual_tracking import ManualTracking
 from .cards import CardRenderers, Publisher
 from .config import Settings, load_settings
 from .db import Database, LeaderLock
@@ -66,6 +67,7 @@ class AutomationRuntime:
         self.radar = None
         self.webhook: Optional[WebhookServer] = None
         self.approval = ApprovalHandler(self)
+        self.manual = ManualTracking(self)
         self._tasks: set[asyncio.Task] = set()
         self._leader_children: list[asyncio.Task] = []
         self._leader_task: Optional[asyncio.Task] = None
@@ -261,6 +263,9 @@ class AutomationRuntime:
         await db.fetch(q.RECOVER_STUCK_APPROVING, 120.0)
         # Expired proposals: remove buttons.
         for proposal in await db.fetch(q.EXPIRE_PROPOSALS):
+            if proposal["classification"] == "MANUAL":
+                # Private previews expire silently; never leak them to the channel.
+                continue
             for message_id in (proposal["message_id"], proposal["reconfirm_message_id"]):
                 if message_id:
                     try:
@@ -516,6 +521,8 @@ def setup_automation(application: Application, renderers: CardRenderers) -> Opti
     application.add_handler(
         CallbackQueryHandler(runtime.approval.on_callback, pattern=r"^qa:")
     )
+    application.add_handler(CommandHandler("qa_track", runtime.manual.command))
+    application.add_handler(CallbackQueryHandler(runtime.manual.callback, pattern=r"^qam:"))
     application.add_handler(CommandHandler("qa_status", runtime.cmd_status))
     application.add_handler(CommandHandler("qa_close", runtime.cmd_close))
     application.add_handler(CommandHandler("qa_daily", runtime.cmd_daily))
