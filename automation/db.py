@@ -148,8 +148,12 @@ class Database:
         status: str,
         message_id: Optional[int] = None,
         error: Optional[str] = None,
+        sent_at: Optional[datetime] = None,
     ) -> None:
-        await self.execute(q.MARK_EVENT, event_id, status, message_id, error)
+        if status == "SENT" and sent_at is not None:
+            await self.execute(q.MARK_SENT_EVENT, event_id, message_id, sent_at)
+        else:
+            await self.execute(q.MARK_EVENT, event_id, status, message_id, error)
 
     async def record_event(
         self,
