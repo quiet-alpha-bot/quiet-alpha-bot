@@ -66,6 +66,7 @@ GET_SIGNAL = "SELECT * FROM signals WHERE id = $1"
 SIGNALS_BEFORE_WATCH = """
 SELECT id, direction, signal_time FROM signals
 WHERE signal_time >= $1 AND signal_time < $2
+  AND source <> 'manual'
 ORDER BY signal_time
 """
 
@@ -188,6 +189,7 @@ UPDATE proposals
 SET status = 'APPROVING', approving_from = status, approving_since = now(),
     updated_at = now()
 WHERE id = $1 AND status = $2
+  AND classification IS DISTINCT FROM 'MANUAL'
   AND (expires_at IS NULL OR expires_at > now())
 RETURNING *
 """
@@ -427,7 +429,7 @@ ORDER BY t.closed_at LIMIT 50
 """
 LATEST_DIRECTION_SIGNAL = """
 SELECT * FROM signals WHERE signal_time >= $1 AND signal_time <= $2
-AND ticker IS NOT DISTINCT FROM $3
+AND ticker IS NOT DISTINCT FROM $3 AND source <> 'manual'
 ORDER BY signal_time DESC, id DESC LIMIT 1
 """
 
@@ -454,3 +456,24 @@ WHERE entity_type = 'trade' AND entity_id = $1 AND event_type = 'MILESTONE'
   AND status <> 'SENT'
 ORDER BY level LIMIT 1
 """
+
+# Manual requests are never consumed by the TradingView pipeline.
+INSERT_MANUAL_SIGNAL = """
+INSERT INTO signals (signal_id, source, direction, event_type, ticker,
+                     signal_time, payload, status, classification)
+VALUES ($1, 'manual', $2, 'MANUAL', $3, $4, $5::jsonb, 'PROPOSED', 'MANUAL')
+ON CONFLICT (signal_id) DO UPDATE SET signal_id = EXCLUDED.signal_id
+RETURNING *
+"""
+GET_PROPOSAL_BY_SIGNAL = "SELECT * FROM proposals WHERE signal_db_id = $1"
+LOCK_MANUAL_PROPOSAL = """
+SELECT * FROM proposals WHERE id = $1 AND classification = 'MANUAL' FOR UPDATE
+"""
+APPROVE_MANUAL_PROPOSAL = """
+UPDATE proposals SET status = 'APPROVED', decided_at = now(), decided_by = $2,
+    decision_note = 'manual entry supplied by owner', updated_at = now()
+WHERE id = $1 AND classification = 'MANUAL' AND status = 'PENDING_APPROVAL'
+  AND expires_at > now()
+RETURNING id
+"""
+TRADE_BY_PROPOSAL = "SELECT * FROM trades WHERE proposal_id = $1"
