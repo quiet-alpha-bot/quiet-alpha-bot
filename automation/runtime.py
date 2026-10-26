@@ -28,6 +28,7 @@ from telegram.ext import Application, CallbackQueryHandler, CommandHandler, Cont
 from . import queries as q
 from .approval import ApprovalHandler
 from .manual_tracking import ManualTracking
+from .contract_support import ContractSupport
 from .cards import CardRenderers, Publisher
 from .config import Settings, load_settings
 from .db import Database, LeaderLock
@@ -65,6 +66,7 @@ class AutomationRuntime:
         self.watch: Optional[WatchEngine] = None
         self.liquidity = None
         self.radar = None
+        self.contract_support = None
         self.webhook: Optional[WebhookServer] = None
         self.approval = ApprovalHandler(self)
         self.manual = ManualTracking(self)
@@ -125,6 +127,7 @@ class AutomationRuntime:
         if self.uw is not None:
             self.liquidity = LiquidityService(self.uw, s.selection.flow_max_pages)
             self.radar = LiquidityRadar(s, self.db, self.publisher, self.liquidity)
+            self.contract_support = ContractSupport(s, self.db, self.publisher, self.liquidity)
         self.pipeline = SignalPipeline(s, self.db, self.uw, self.publisher, self.liquidity)
         self.tracker = Tracker(s, self.db, self.uw, self.publisher, self.renderers)
         if self.uw is not None:
@@ -224,6 +227,8 @@ class AutomationRuntime:
             f = self.settings.flags
             if f.liquidity_radar and self.radar is not None:
                 self._leader_children.append(asyncio.create_task(self.radar.run(), name="qa-radar"))
+            if f.tracking and self.contract_support is not None:
+                self._leader_children.append(asyncio.create_task(self.contract_support.run(), name="qa-contract-support"))
             if f.uw_watch and self.watch is not None:
                 self._leader_children.append(
                     asyncio.create_task(self.watch.run(), name="qa-watch")
@@ -358,6 +363,10 @@ class AutomationRuntime:
             lines.append(f"Radar data: {self.radar.last_error}")
         if self.watch and self.watch.last_error:
             lines.append(f"Watch last error: {self.watch.last_error}")
+        if self.contract_support is not None and self.settings.flags.tracking:
+            lines.append("Contract support: enabled · once after success · checks every 60s")
+            if self.contract_support.last_error:
+                lines.append(f"Contract support data: {self.contract_support.last_error}")
         for warning in self.disabled:
             lines.append(f"⚠️ {warning}")
         for t in trades[:10]:
