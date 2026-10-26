@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal
 from html import escape
 from typing import Sequence
+from zoneinfo import ZoneInfo
 
 from .models import money
 from .occ import strike_text
@@ -75,6 +76,30 @@ def summarize_daily_trades(trades: Sequence, success_dollars: Decimal) -> dict:
     }
 
 
+def trade_timing(trade) -> str:
+    """Telegram publication to first occurrence of the tracked peak; no backfill."""
+    published = trade.get("published_at")
+    peak = trade.get("highest_bid_time")
+    time_text = duration = "—"
+    if isinstance(published, datetime) and published.tzinfo is not None:
+        local = published.astimezone(ZoneInfo("Asia/Riyadh"))
+        time_text = f"{local.hour % 12 or 12}:{local.minute:02d} {'ص' if local.hour < 12 else 'م'}"
+        if isinstance(peak, datetime) and peak.tzinfo is not None:
+            elapsed = (peak - published).total_seconds()
+            if elapsed >= 0:
+                hours, rest = divmod(int(elapsed), 3600)
+                minutes, seconds = divmod(rest, 60)
+                parts = []
+                if hours:
+                    parts.append(f"{hours}س")
+                if minutes:
+                    parts.append(f"{minutes}د")
+                if seconds or not parts:
+                    parts.append(f"{seconds}ث")
+                duration = " ".join(parts)
+    return f"🕒 {time_text} | ⏱ {duration}"
+
+
 def daily_report_text(
     trades: Sequence,
     day: date,
@@ -103,7 +128,7 @@ def daily_report_text(
     ]
 
     if trades:
-        lines.extend(["", "<b>تفاصيل الصفقات</b>", "سعر الدخول → أعلى سعر مرصود"])
+        lines.extend(["", "<b>تفاصيل الصفقات</b>", "سعر الدخول → أعلى سعر مرصود", "🕒 الطرح بتوقيت السعودية · ⏱ المدة إلى أعلى سعر"])
         for index, (trade, result) in enumerate(
             zip(trades[:30], summary["results"][:30]), start=1
         ):
@@ -120,6 +145,7 @@ def daily_report_text(
                 f"| {_signed_usd(result)}</code>"
                 + (" — خروج على رأس المال" if flat else "")
             )
+            lines.append(trade_timing(trade))
         if len(trades) > 30:
             lines.append(f"… و{len(trades) - 30} صفقات أخرى")
 
