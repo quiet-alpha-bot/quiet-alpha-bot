@@ -23,6 +23,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass
+from datetime import datetime
 from decimal import Decimal
 from io import BytesIO
 from typing import Any, Callable, Optional
@@ -124,7 +125,10 @@ class Publisher:
             logger.exception("%s/%s %s failed", entity_type, entity_id, event_type)
             return None
         message_id = getattr(message, "message_id", None)
-        await self.db.mark_event(event_id, "SENT", message_id, None)
+        sent_at = getattr(message, "date", None)
+        if not isinstance(sent_at, datetime) or sent_at.tzinfo is None:
+            sent_at = None
+        await self.db.mark_event(event_id, "SENT", message_id, None, sent_at=sent_at)
         return message_id
 
     async def text_once(
