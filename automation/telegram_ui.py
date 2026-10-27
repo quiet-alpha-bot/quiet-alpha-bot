@@ -19,6 +19,8 @@ CB_APPROVE = "ap"
 CB_REJECT = "rj"
 CB_RECONFIRM = "rc"
 CB_CANCEL = "cn"
+CB_PUBLIC = "pub"
+CB_PRIVATE = "priv"
 
 
 def callback_data(action: str, proposal_id: int) -> str:
@@ -31,12 +33,19 @@ def parse_callback(data: Optional[str]) -> Optional[tuple[str, int]]:
     parts = data.split(":")
     if len(parts) != 3 or parts[0] != CB_PREFIX or not parts[2].isdigit():
         return None
-    if parts[1] not in {CB_APPROVE, CB_REJECT, CB_RECONFIRM, CB_CANCEL}:
+    if parts[1] not in {CB_APPROVE, CB_REJECT, CB_RECONFIRM, CB_CANCEL, CB_PUBLIC, CB_PRIVATE}:
         return None
     return parts[1], int(parts[2])
 
 
 def proposal_keyboard(proposal_id: int) -> InlineKeyboardMarkup:
+    from .channel_routing import enabled
+    if enabled():
+        return InlineKeyboardMarkup([[
+            InlineKeyboardButton('🌐 العامة',callback_data=callback_data(CB_PUBLIC,proposal_id)),
+            InlineKeyboardButton('🔒 الخاصة',callback_data=callback_data(CB_PRIVATE,proposal_id)),
+            InlineKeyboardButton('❌ رفض',callback_data=callback_data(CB_REJECT,proposal_id)),
+        ]])
     return InlineKeyboardMarkup(
         [[
             InlineKeyboardButton("✅ APPROVE", callback_data=callback_data(CB_APPROVE, proposal_id)),
@@ -122,6 +131,7 @@ def proposal_text(
     composite_strength: Optional[Decimal] = None,
     uw_aligned: Optional[bool] = None,
     pre_proposal_high: Optional[Decimal] = None,
+    live_confirmation: Optional[dict] = None,
 ) -> str:
     spread = (ask - bid) if (bid is not None and ask is not None) else None
     status = UW_STATUS_TEXT.get(classification, classification or "—")
@@ -131,8 +141,9 @@ def proposal_text(
         "🦋 <b>QUIET ALPHA — TRADE PROPOSAL</b>",
         "",
         f"Direction: <b>{escape(direction)}</b>",
-        f"Source: {escape(classification or 'N/A')}",
-        f"UW Confirmation: {escape(status)}",
+        ("Source: TradingView + UW Current Flow" if live_confirmation else f"Source: {escape(classification or 'N/A')}"),
+        (f"UW Confirmation: ✅ التدفقات الحالية تؤكد {escape(direction)} · آخر {live_confirmation['window_minutes']} دقائق"
+         if live_confirmation else f"UW Confirmation: {escape(status)}"),
     ]
     if composite_strength is not None:
         alignment = (
@@ -142,7 +153,7 @@ def proposal_text(
         )
         lines.extend(
             [
-                f"قوة الصفقة: <b>{strength_pct(composite_strength)} — {strength_label(composite_strength)}</b>",
+                f"{'تقييم التوافق' if live_confirmation else 'قوة الصفقة'}: <b>{strength_pct(composite_strength)} — {strength_label(composite_strength)}</b>",
                 f"TradingView: {strength_pct(tv_strength)}",
                 f"UW: {strength_pct(uw_strength)} · {alignment}",
             ]
@@ -168,7 +179,11 @@ def proposal_text(
     )
     if reasons:
         lines.append("Selection: " + escape(" · ".join(reasons)))
-    if uw_context:
+    if live_confirmation:
+        lines.append("مطابقة UW WATCH المنفصلة: " + escape(status))
+        if uw_context:
+            lines.append("سياق WATCH: " + escape(uw_context))
+    elif uw_context:
         lines.append("UW Context: " + escape(uw_context))
     if expires_at is not None:
         lines.append(f"⏳ صالح حتى: {display_time(expires_at, tz_name)}")
