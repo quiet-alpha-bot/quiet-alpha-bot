@@ -5,7 +5,9 @@ from . import queries as q
 PUBLIC_CHAT = '-1003813791281'
 PRIVATE_CHAT = '-1004417588627'
 PUBLIC_EVENTS = frozenset({'ENTRY_CARD','MILESTONE','SUCCESS_CARD','HIGHEST_CARD',
-                          'STOP_LOSS_CARD','BREAKEVEN_APPROACH','BREAKEVEN_EXIT','TRADE_EXIT'})
+                          'STOP_LOSS_CARD','BREAKEVEN_APPROACH','BREAKEVEN_EXIT'})
+# TRADE_EXIT is administrative: protection still closes tracking, while the
+# publication channel receives its result card without the generic exit text.
 
 
 def enabled():
