@@ -9,7 +9,9 @@ The automation layer never re-implements card drawing. main.py passes the
 same functions that power /c /p /win /max into CardRenderers, and every
 image is produced by them, unchanged.
 
-All output goes to SIGNAL_CHAT_ID only. Every message that must appear
+Operational output stays in SIGNAL_CHAT_ID. Approved trade publications use
+the immutable destination on the trade, with separate admin ledger copies.
+Every message that must appear
 once (entry card, +10% notification, success card, highest card, proposal)
 goes through the `events` ledger:
 
@@ -34,6 +36,8 @@ from telegram.error import BadRequest, Forbidden, NetworkError, RetryAfter, Time
 
 from .db import Database
 from .models import money
+from .channel_routing import trade_destination
+from . import queries as q
 
 logger = logging.getLogger("quiet-alpha.cards")
 
@@ -88,6 +92,12 @@ class Publisher:
         self.chat_id = chat_id
         self.db = db
 
+    async def publication_ready(self, entity_type, entity_id, event_type, target):
+        if entity_type != 'trade' or str(target) == str(self.chat_id) or event_type == 'ENTRY_CARD':
+            return True
+        entry = await self.db.fetchrow(q.EVENT_STATUS,'trade',entity_id,'ENTRY_CARD',0)
+        return entry is not None and entry['status'] == 'SENT'
+
     async def _deliver(
         self,
         entity_type: str,
@@ -141,21 +151,21 @@ class Publisher:
         reply_markup: Optional[InlineKeyboardMarkup] = None,
         payload: Optional[dict] = None,
         max_attempts: int = 3,
+        chat_id: Optional[str] = None,
     ) -> Optional[int]:
-        return await self._deliver(
-            entity_type,
-            entity_id,
-            event_type,
-            level,
-            payload,
-            lambda: self.bot.send_message(
-                chat_id=self.chat_id,
-                text=text,
-                parse_mode=ParseMode.HTML,
-                reply_markup=reply_markup,
-            ),
-            max_attempts,
-        )
+        target = chat_id or await trade_destination(self.db,entity_type,entity_id,event_type,self.chat_id)
+        if not await self.publication_ready(entity_type,entity_id,event_type,target):
+            return None
+        async def send_to(chat):
+            return await self.bot.send_message(chat_id=chat,text=text,parse_mode=ParseMode.HTML,
+                                               reply_markup=reply_markup)
+        result = await self._deliver(
+            entity_type,entity_id,event_type,level,
+            dict(payload or {},publication_chat_id=str(target)),lambda:send_to(target),max_attempts)
+        if entity_type == 'trade' and str(target) != str(self.chat_id):
+            await self._deliver('trade_admin',entity_id,event_type,level,payload,
+                                lambda:send_to(self.chat_id),max_attempts)
+        return result
 
     async def photo_once(
         self,
@@ -167,18 +177,26 @@ class Publisher:
         payload: Optional[dict] = None,
         max_attempts: int = 3,
     ) -> Optional[int]:
-        async def send():
+        target = await trade_destination(self.db,entity_type,entity_id,event_type,self.chat_id)
+        if not await self.publication_ready(entity_type,entity_id,event_type,target):
+            return None
+        async def send(chat):
             card = await asyncio.to_thread(render)
             try:
                 return await self.bot.send_photo(
-                    chat_id=self.chat_id, photo=card, **PHOTO_TIMEOUTS
+                    chat_id=chat, photo=card, **PHOTO_TIMEOUTS
                 )
             finally:
                 card.close()
 
-        return await self._deliver(
-            entity_type, entity_id, event_type, level, payload, send, max_attempts
+        result = await self._deliver(
+            entity_type, entity_id, event_type, level,
+            dict(payload or {},publication_chat_id=str(target)),lambda:send(target),max_attempts
         )
+        if entity_type == 'trade' and str(target) != str(self.chat_id):
+            await self._deliver('trade_admin',entity_id,event_type,level,payload,
+                                lambda:send(self.chat_id),max_attempts)
+        return result
 
     async def text(self, text: str, reply_markup: Optional[InlineKeyboardMarkup] = None) -> Optional[int]:
         """Non-ledgered informational message (status/errors). Best effort."""
