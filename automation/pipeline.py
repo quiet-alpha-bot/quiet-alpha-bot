@@ -16,6 +16,7 @@ import asyncio
 import json
 import logging
 from contextvars import ContextVar
+from dataclasses import replace
 from datetime import timedelta
 from decimal import Decimal, InvalidOperation
 from typing import Optional
@@ -104,6 +105,20 @@ def _proposal_strengths(row, result, watch_rows: dict):
         composite = None
 
     return tv_strength, uw_strength, _percent(composite), uw_aligned
+
+
+def live_proposal_strengths(row, snapshot):
+    """A descriptive agreement score, never a probability of winning."""
+    tv = snapshot.indicator_strength
+    if tv is None:
+        tv = _payload_strength(row)
+    uw = _percent(abs(snapshot.market_strength) * 100) if snapshot.market_strength is not None else None
+    directional = snapshot.market_directional
+    aligned = (directional is not None and
+               ((row["direction"] == "CALL" and directional > 0) or
+                (row["direction"] == "PUT" and directional < 0)))
+    combined = (tv + (uw if aligned else 100-uw))/2 if tv is not None and uw is not None else None
+    return tv, uw, _percent(combined), aligned
 
 
 class SignalPipeline:
@@ -223,6 +238,7 @@ class SignalPipeline:
     # -----------------------------------------------------
     async def _process(self, row) -> None:
         direction = Direction(row["direction"])
+        requires_flow = self.s.flags.flow_selection or bool(self._signal_payload(row).get("alternative_count"))
         signal_time = row["signal_time"]
 
         result, watch_active, watch_rows = await self.classify(row)
@@ -256,7 +272,7 @@ class SignalPipeline:
         blocked_strikes = await self._open_strikes(direction)
         excluded = set(self._signal_payload(row).get("excluded_symbols", []))
         quotes = [quote for quote in quotes if quote.symbol not in excluded]
-        if self.s.flags.flow_selection:
+        if requires_flow:
             snapshot = await self._confirmed_flow(row)
             if snapshot is None:
                 reason = "MOMENTUM_OR_FLOW_UNCONFIRMED — " + flow_rejection_reason.get()
@@ -287,7 +303,7 @@ class SignalPipeline:
             if entry_result.decision is EntryDecision.ENTER:
                 break
             overpriced = latest is not None and latest.ask is not None and latest.ask > self.s.selection.premium_max
-            if not (self.s.flags.flow_selection and overpriced
+            if not (requires_flow and overpriced
                     and attempts < self.s.selection.alternative_attempts):
                 await self._finish_run(run_id, "SKIPPED", entry_result.reason, ticker, expiry,
                                        spot, selection.candidates, chosen.symbol, meta)
@@ -322,7 +338,7 @@ class SignalPipeline:
             await self._finish(row, SignalStatus.SKIPPED, "STRIKE_ALREADY_OPEN")
             return
 
-        if self.s.flags.flow_selection:
+        if requires_flow:
             snapshot = await self._confirmed_flow(row)
             verification = None if snapshot is None else select_with_flow(
                 [latest], direction, expiry, self.s.uw.contract_root,
@@ -346,13 +362,22 @@ class SignalPipeline:
             return
 
         reasons = selection_reasons(selection)
-        if self.s.flags.flow_selection:
+        if requires_flow:
             reasons.insert(0, "الأقوى حسب صافي تدفقات الشراء الحديثة بين العقود المؤهلة")
             if attempts or self._signal_payload(row).get("alternative_count"):
-                reasons.insert(0, "استرايك بديل بعد تجاوز العقد السابق نطاق الطرح")
-        tv_strength, uw_strength, composite_strength, uw_aligned = _proposal_strengths(
-            row, result, watch_rows
-        )
+                reasons.insert(0, "استرايك بديل بعد خروج سعر العقد السابق عن نطاق الطرح")
+        live_confirmation = None
+        if requires_flow:
+            tv_strength, uw_strength, composite_strength, uw_aligned = live_proposal_strengths(row, snapshot)
+            live_confirmation = {
+                "window_minutes": self.s.selection.flow_window_minutes,
+                "direction": row["direction"],
+                "directional": str(snapshot.market_directional),
+                "start": snapshot.start.isoformat(), "end": snapshot.end.isoformat(),
+                "watch_status": result.classification.value if result else None,
+            }
+        else:
+            tv_strength, uw_strength, composite_strength, uw_aligned = _proposal_strengths(row, result, watch_rows)
         expires_at = (
             utcnow() + timedelta(seconds=self.s.approval.proposal_expiry_seconds)
             if self.s.approval.proposal_expiry_seconds
@@ -360,6 +385,8 @@ class SignalPipeline:
         )
         details = {
             "reasons": reasons,
+            "requires_flow": requires_flow,
+            "live_confirmation": live_confirmation,
             "entry_reason": entry_result.reason,
             "uw_context": self._uw_context(result, signal_time, watch_rows),
             "watch_engine_active": watch_active,
@@ -393,6 +420,13 @@ class SignalPipeline:
         if proposal is None:
             return  # proposal already exists for this signal
 
+        channel = self._signal_payload(row).get("publication_chat_id") if self._signal_payload(row).get("alternative_count") else None
+        if channel:
+            from .channel_routing import PUBLIC_CHAT, PRIVATE_CHAT
+            if channel not in (PUBLIC_CHAT, PRIVATE_CHAT):
+                raise ValueError("Invalid inherited publication channel")
+            await self.db.execute(q.SET_ALTERNATIVE_CHANNEL, proposal["id"], channel)
+
         text = proposal_text(
             proposal_id=proposal["id"],
             direction=direction.value,
@@ -417,13 +451,17 @@ class SignalPipeline:
             composite_strength=composite_strength,
             uw_aligned=uw_aligned,
             pre_proposal_high=pre_proposal_high,
+            live_confirmation=live_confirmation,
         )
+        if channel:
+            from .channel_routing import channel_name
+            text += f"\nقناة النشر المحفوظة: <b>{channel_name(channel)}</b> — يلزم تأكيد البديل."
         message_id = await self.publisher.text_once(
             "proposal",
             proposal["id"],
             "PROPOSAL",
             text,
-            reply_markup=proposal_keyboard(proposal["id"]),
+            reply_markup=proposal_keyboard(proposal["id"], channel),
         )
         if message_id is not None:
             await self.db.execute(q.SET_PROPOSAL_MESSAGE, proposal["id"], message_id)
@@ -485,7 +523,7 @@ class SignalPipeline:
                 f"(الصافي الاتجاهي {directional:+.2f} دولار)، لا يؤكد {row['direction']}. "
                 f"للمقارنة فقط، صافي عقود النطاق: CALL={net_call}، PUT={net_put}"
             )
-        return snapshot
+        return replace(snapshot, indicator_strength=strength)
 
     async def propose_alternative(self, proposal):
         """A new proposal requires a NEW owner approval; old buttons cannot approve it."""
@@ -495,6 +533,7 @@ class SignalPipeline:
         if count >= self.s.selection.alternative_attempts or await self._confirmed_flow(row) is None:
             return None
         payload["alternative_count"] = count + 1
+        payload["publication_chat_id"] = proposal.get("publication_chat_id")
         payload["excluded_symbols"] = list(set(payload.get("excluded_symbols", [])) | {proposal["option_symbol"]})
         ident = f"{row['signal_id']}:alternative"
         assert self.db.pool is not None
