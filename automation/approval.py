@@ -19,11 +19,13 @@ from telegram import Update
 from telegram.ext import ContextTypes
 
 from . import queries as q
+from . import channel_routing as routing
 from .entry import within_tolerance
 from .models import ProposalStatus, TradeStatus
 from .telegram_ui import (
     CB_APPROVE,
     CB_CANCEL,
+    CB_PUBLIC, CB_PRIVATE, proposal_keyboard,
     CB_RECONFIRM,
     CB_REJECT,
     contract_label,
@@ -76,7 +78,17 @@ class ApprovalHandler:
 
         action, proposal_id = parsed
         try:
-            if action == CB_APPROVE:
+            if action in (CB_PUBLIC, CB_PRIVATE):
+                if not routing.enabled():
+                    await query.answer('اختيار القنوات غير مفعّل.',show_alert=True)
+                    return
+                await self._approve(query, proposal_id, ProposalStatus.PENDING_APPROVAL, user.id,
+                                    routing.destination('public' if action == CB_PUBLIC else 'private'))
+            elif action == CB_APPROVE:
+                if routing.enabled():
+                    await query.edit_message_reply_markup(reply_markup=proposal_keyboard(proposal_id))
+                    await query.answer('اختاري قناة النشر: العامة أو الخاصة.',show_alert=True)
+                    return
                 await self._approve(query, proposal_id, ProposalStatus.PENDING_APPROVAL, user.id)
             elif action == CB_RECONFIRM:
                 await self._approve(query, proposal_id, ProposalStatus.NEEDS_RECONFIRM, user.id)
@@ -126,10 +138,27 @@ class ApprovalHandler:
                 pass
 
     async def _approve(self, query, proposal_id: int, expected: ProposalStatus,
-                       user_id: int) -> None:
+                       user_id: int, publication_chat_id=None) -> None:
         rt = self.rt
         s = rt.settings
-        proposal = await rt.db.fetchrow(q.BEGIN_APPROVAL, proposal_id, expected.value)
+        existing = await rt.db.fetchrow(q.GET_PROPOSAL, proposal_id)
+        if existing is None:
+            await self._answer_status(query, proposal_id)
+            return
+        chosen = publication_chat_id or existing.get('publication_chat_id')
+        if routing.enabled() and chosen is None:
+            await query.answer('هذا الاقتراح قديم؛ يلزم اختيار قناة نشر في اقتراح جديد.',show_alert=True)
+            return
+        if chosen:
+            try:
+                await routing.check_permission(rt.app.bot,chosen,s.signal_chat_id)
+            except Exception:
+                await query.answer('تعذر التأكد من صلاحية النشر في القناة المختارة. راجعي صلاحيات البوت.',show_alert=True)
+                return
+        if publication_chat_id:
+            proposal = await rt.db.fetchrow(routing.BEGIN_ROUTED_APPROVAL,proposal_id,expected.value,publication_chat_id)
+        else:
+            proposal = await rt.db.fetchrow(q.BEGIN_APPROVAL, proposal_id, expected.value)
         if proposal is None:
             await self._answer_status(query, proposal_id)
             return
@@ -222,7 +251,7 @@ class ApprovalHandler:
                 current,
                 quote.bid,
                 s.tracking.success_premium_gain,
-                " · ".join(reasons),
+                " · ".join(reasons) + (f" · قناة النشر: {routing.channel_name(chosen)}" if chosen else ''),
             ),
             reply_markup=reconfirm_keyboard(proposal_id),
         )
@@ -301,6 +330,8 @@ class ApprovalHandler:
             f"<i>Suggested {usd(Decimal(proposal['suggested_entry']))} · "
             f"Success {usd(approved_entry + rt.settings.tracking.success_premium_gain)}</i>"
         )
+        if proposal.get('publication_chat_id'):
+            footer += f"\nقناة النشر: <b>{routing.channel_name(proposal['publication_chat_id'])}</b>"
         html = await _message_html(query)
         if html and query.message is not None:
             await rt.publisher.edit(query.message.message_id, decision_footer(html, footer))
