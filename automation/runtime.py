@@ -26,6 +26,7 @@ from telegram import Update
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes
 
 from . import queries as q
+from . import channel_routing as routing
 from .approval import ApprovalHandler
 from .manual_tracking import ManualTracking
 from .contract_support import ContractSupport
@@ -288,6 +289,18 @@ class AutomationRuntime:
                         pass
             await self.publisher.text(f"⌛ Proposal #{proposal['id']} EXPIRED")
         await self._send_daily_report_if_due()
+        # Retry definite closing-card failures even after the trade leaves TRACKING.
+        for trade in await db.fetch(routing.PENDING_CLOSE_PUBLICATIONS):
+            reason = trade['close_reason']
+            if reason == 'BREAKEVEN_EXIT':
+                await self.tracker.send_breakeven_exit(trade)
+            elif reason in ('STOP_LOSS_30','STOP_LOSS_50'):
+                if self.settings.flags.stop_loss_card:
+                    await self.tracker.send_stop_loss_card(trade)
+            else:
+                await self.tracker.send_public_exit(trade)
+            if reason != 'BREAKEVEN_EXIT' and self.settings.flags.highest_card:
+                await self.tracker.send_highest_card(trade)
 
     async def _send_daily_report_if_due(self) -> None:
         """Send one report after all of today's trades have closed."""
@@ -303,7 +316,16 @@ class AutomationRuntime:
         if now < report_at:
             return
         trades = await self.db.fetch(q.DAILY_TRADES, day)
-        if not trades or any(trade["status"] == "TRACKING" for trade in trades):
+        if not trades:
+            return
+        # Each channel closes its own report independently of other channels.
+        for chat_id, group in routing.report_groups(trades).items():
+            if any(t['status'] == 'TRACKING' for t in group):
+                continue
+            text, payload = daily_report_text(group,day,self.settings.tracking.success_premium_gain)
+            await self.publisher.text_once('daily',int(day.strftime('%Y%m%d')),
+                'DAILY_REPORT_'+str(chat_id),text,payload=payload,chat_id=chat_id)
+        if any(trade['status'] == 'TRACKING' for trade in trades):
             return
         text, payload = daily_report_text(
             trades, day, self.settings.tracking.success_premium_gain
@@ -351,6 +373,7 @@ class AutomationRuntime:
             f"Tracking trades: {len(trades)}",
             f"Last UW watch observation: {last_obs.isoformat() if last_obs else '—'}",
         ]
+        lines.append('Channels: '+('enabled · public/private selection' if routing.enabled() else 'admin only for new trades'))
         if self.uw is not None:
             lines.append(
                 f"UW requests (this process): {self.uw.request_count} · "
@@ -397,6 +420,19 @@ class AutomationRuntime:
         await update.message.reply_text(
             "✅ تم إغلاق المتابعة." if closed else "لا توجد صفقة TRACKING بهذا الرقم."
         )
+
+    async def cmd_channels(self, update, context):
+        if not await self._guard(update):
+            return
+        lines = ['🦋 QUIET ALPHA — قنوات النشر']
+        for chat in (routing.PUBLIC_CHAT,routing.PRIVATE_CHAT):
+            try:
+                await routing.check_permission(self.app.bot,chat,self.settings.signal_chat_id)
+                lines.append(f'✅ {routing.channel_name(chat)}: البوت يملك صلاحية النشر')
+            except Exception:
+                lines.append(f'❌ {routing.channel_name(chat)}: تعذر التحقق من صلاحية النشر')
+        lines.append('اختيار القنوات: '+('مفعّل' if routing.enabled() else 'غير مفعّل'))
+        await update.message.reply_text('\n'.join(lines))
 
     async def cmd_daily(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Owner-only preview; does not consume the automatic daily report."""
@@ -544,6 +580,7 @@ def setup_automation(application: Application, renderers: CardRenderers) -> Opti
     application.add_handler(CommandHandler("qa_track", runtime.manual.command))
     application.add_handler(CallbackQueryHandler(runtime.manual.callback, pattern=r"^qam:"))
     application.add_handler(CommandHandler("qa_status", runtime.cmd_status))
+    application.add_handler(CommandHandler("qa_channels", runtime.cmd_channels))
     application.add_handler(CommandHandler("qa_close", runtime.cmd_close))
     application.add_handler(CommandHandler("qa_daily", runtime.cmd_daily))
     application.add_handler(CommandHandler("qa_radar", runtime.cmd_radar))
