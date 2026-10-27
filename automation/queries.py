@@ -274,9 +274,9 @@ INSERT_TRADE = """
 INSERT INTO trades (proposal_id, signal_db_id, signal_id, option_symbol,
                     direction, strike, expiry, suggested_entry, approved_entry,
                     approval_quote, classification, uw_watch_id, signal_time,
-                    approval_time, current_bid, current_ask, current_last)
+                    approval_time, current_bid, current_ask, current_last, publication_chat_id)
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11, $12, $13, $14,
-        $15, $16, $17)
+        $15, $16, $17, (SELECT publication_chat_id FROM proposals WHERE id=$1))
 ON CONFLICT (proposal_id) DO NOTHING
 RETURNING *
 """
@@ -288,11 +288,12 @@ TRACKING_TRADES = "SELECT * FROM trades WHERE status = 'TRACKING' ORDER BY id"
 RECENT_TRADES = "SELECT * FROM trades ORDER BY id DESC LIMIT $1"
 
 DAILY_TRADES = """
-SELECT t.*, (e.payload->>'telegram_sent_at')::timestamptz AS published_at
+SELECT t.*, (e.payload->>'telegram_sent_at')::timestamptz AS published_at,
+       e.message_id AS entry_message_id
 FROM trades AS t
 JOIN proposals AS p ON p.id = t.proposal_id
 LEFT JOIN events AS e ON e.entity_type = 'trade' AND e.entity_id = t.id
-    AND e.event_type = 'ENTRY_CARD' AND e.level = 0 AND e.status = 'SENT' 
+    AND e.event_type = 'ENTRY_CARD' AND e.level = 0 AND e.status = 'SENT'
 WHERE (t.approval_time AT TIME ZONE 'America/New_York')::date = $1
   AND p.status = 'APPROVED'
   AND t.status IN ('TRACKING', 'CLOSED')
