@@ -10,7 +10,7 @@ same functions that power /c /p /win /max into CardRenderers, and every
 image is produced by them, unchanged.
 
 Operational output stays in SIGNAL_CHAT_ID. Approved trade publications use
-the immutable destination on the trade, with separate admin ledger copies.
+the immutable destination on the trade, without duplicate admin copies.
 Every message that must appear
 once (entry card, +10% notification, success card, highest card, proposal)
 goes through the `events` ledger:
@@ -162,9 +162,6 @@ class Publisher:
         result = await self._deliver(
             entity_type,entity_id,event_type,level,
             dict(payload or {},publication_chat_id=str(target)),lambda:send_to(target),max_attempts)
-        if entity_type == 'trade' and str(target) != str(self.chat_id):
-            await self._deliver('trade_admin',entity_id,event_type,level,payload,
-                                lambda:send_to(self.chat_id),max_attempts)
         return result
 
     async def photo_once(
@@ -193,9 +190,6 @@ class Publisher:
             entity_type, entity_id, event_type, level,
             dict(payload or {},publication_chat_id=str(target)),lambda:send(target),max_attempts
         )
-        if entity_type == 'trade' and str(target) != str(self.chat_id):
-            await self._deliver('trade_admin',entity_id,event_type,level,payload,
-                                lambda:send(self.chat_id),max_attempts)
         return result
 
     async def text(self, text: str, reply_markup: Optional[InlineKeyboardMarkup] = None) -> Optional[int]:
