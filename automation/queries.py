@@ -492,3 +492,9 @@ UPDATE events SET status = 'SENT', message_id = $2, last_error = NULL,
              || jsonb_build_object('telegram_sent_at', $3::timestamptz) END
 WHERE id = $1
 """
+
+# Save inherited routing before publishing the alternative's approval buttons.
+SET_ALTERNATIVE_CHANNEL = """
+UPDATE proposals SET publication_chat_id=$2, updated_at=now()
+WHERE id=$1 AND status='PENDING_APPROVAL' AND publication_chat_id IS NULL
+"""
