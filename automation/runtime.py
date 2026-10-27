@@ -29,6 +29,7 @@ from . import queries as q
 from .approval import ApprovalHandler
 from .manual_tracking import ManualTracking
 from .contract_support import ContractSupport
+from .company_radar import CompanyRadar
 from .cards import CardRenderers, Publisher
 from .config import Settings, load_settings
 from .db import Database, LeaderLock
@@ -67,6 +68,7 @@ class AutomationRuntime:
         self.liquidity = None
         self.radar = None
         self.contract_support = None
+        self.company_radar = None
         self.webhook: Optional[WebhookServer] = None
         self.approval = ApprovalHandler(self)
         self.manual = ManualTracking(self)
@@ -128,6 +130,7 @@ class AutomationRuntime:
             self.liquidity = LiquidityService(self.uw, s.selection.flow_max_pages)
             self.radar = LiquidityRadar(s, self.db, self.publisher, self.liquidity)
             self.contract_support = ContractSupport(s, self.db, self.publisher, self.liquidity)
+            self.company_radar = CompanyRadar(s, self.db, self.publisher, self.uw)
         self.pipeline = SignalPipeline(s, self.db, self.uw, self.publisher, self.liquidity)
         self.tracker = Tracker(s, self.db, self.uw, self.publisher, self.renderers)
         if self.uw is not None:
@@ -227,6 +230,8 @@ class AutomationRuntime:
             f = self.settings.flags
             if f.liquidity_radar and self.radar is not None:
                 self._leader_children.append(asyncio.create_task(self.radar.run(), name="qa-radar"))
+            if f.liquidity_radar and self.company_radar is not None:
+                self._leader_children.append(asyncio.create_task(self.company_radar.run(), name="qa-company-radar"))
             if f.tracking and self.contract_support is not None:
                 self._leader_children.append(asyncio.create_task(self.contract_support.run(), name="qa-contract-support"))
             if f.uw_watch and self.watch is not None:
@@ -367,6 +372,12 @@ class AutomationRuntime:
             lines.append("Contract support: enabled · once after success · checks every 60s")
             if self.contract_support.last_error:
                 lines.append(f"Contract support data: {self.contract_support.last_error}")
+        if self.company_radar is not None and self.settings.flags.liquidity_radar:
+            monitor = self.company_radar
+            lines.append("Company radar: enabled · 10 stocks · all expiries · $1M / 5m · activity >=3x")
+            lines.append(f"Company radar check: {monitor.last_check_at or 'waiting for session'} · checked {monitor.scanned} · insufficient history {monitor.insufficient_history}")
+            if monitor.last_error:
+                lines.append(f"Company radar data: {monitor.last_error}")
         for warning in self.disabled:
             lines.append(f"⚠️ {warning}")
         for t in trades[:10]:
