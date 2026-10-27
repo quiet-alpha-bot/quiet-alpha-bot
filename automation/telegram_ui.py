@@ -38,8 +38,15 @@ def parse_callback(data: Optional[str]) -> Optional[tuple[str, int]]:
     return parts[1], int(parts[2])
 
 
-def proposal_keyboard(proposal_id: int) -> InlineKeyboardMarkup:
-    from .channel_routing import enabled
+def proposal_keyboard(proposal_id: int, publication_chat_id=None) -> InlineKeyboardMarkup:
+    from .channel_routing import enabled, PUBLIC_CHAT, PRIVATE_CHAT, channel_name
+    if publication_chat_id in (PUBLIC_CHAT, PRIVATE_CHAT):
+        action = CB_PUBLIC if publication_chat_id == PUBLIC_CHAT else CB_PRIVATE
+        return InlineKeyboardMarkup([[
+            InlineKeyboardButton(f"✅ تأكيد البديل في {channel_name(publication_chat_id)}",
+                                 callback_data=callback_data(action, proposal_id)),
+            InlineKeyboardButton("❌ رفض", callback_data=callback_data(CB_REJECT, proposal_id)),
+        ]])
     if enabled():
         return InlineKeyboardMarkup([[
             InlineKeyboardButton('🌐 العامة',callback_data=callback_data(CB_PUBLIC,proposal_id)),
