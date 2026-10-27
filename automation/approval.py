@@ -188,18 +188,18 @@ class ApprovalHandler:
             return
 
         current = quote.ask  # buy-side price used for entry
-        if s.flags.flow_selection and current > s.selection.premium_max:
+        if not s.selection.premium_min <= current <= s.selection.premium_max:
             replacement_id = await rt.pipeline.propose_alternative(proposal)
             if replacement_id is not None:
                 if query.message is not None:
                     await query.edit_message_reply_markup(reply_markup=None)
-                await rt.publisher.text("تجاوز العقد نطاق الطرح؛ نبحث عن بديل قوي بنفس الاتجاه، ويتطلب موافقة جديدة.")
+                await rt.publisher.text("خرج سعر العقد عن نطاق الطرح؛ نبحث عن بديل قوي بنفس الاتجاه، مع حفظ قناة النشر وموافقة جديدة.")
                 await rt._schedule_signal(replacement_id)
             else:
                 await rt.db.execute(q.REVERT_APPROVAL, proposal_id)
-                await rt.publisher.text("لا يمكن اعتماد العقد فوق الحد الأعلى؛ لم يتأكد بديل مناسب وزخم مستمر.")
+                await rt.publisher.text("السعر خارج نطاق الطرح، ولم تتأكد شروط البحث عن بديل قوي. لم تُفتح صفقة؛ يبقى المقترح حتى انتهاء صلاحيته.")
             return
-        if s.flags.flow_selection:
+        if s.flags.flow_selection or (proposal.get("details") or {}).get("requires_flow"):
             from .models import Direction
             from .selection import select_with_flow
             signal = await rt.db.fetchrow(q.GET_SIGNAL, proposal["signal_db_id"])
