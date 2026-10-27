@@ -114,6 +114,8 @@ class Tracker:
                 Decimal(trade["approved_entry"]),
             ),
         )
+        if trade.get("publication_chat_id"):
+            return  # Routed trades publish updates only in their selected channel.
         if not self.s.flags.tracking or trade["tracking_message_id"] is not None:
             return
         message_id = await self.publisher.text_once(
@@ -151,7 +153,7 @@ class Tracker:
     async def refresh_message(self, trade_id: int, closed_reason: Optional[str] = None,
                               stale_note: Optional[str] = None) -> None:
         trade = await self.db.fetchrow(q.GET_TRADE, trade_id)
-        if trade is None or trade["tracking_message_id"] is None:
+        if trade is None or trade.get("publication_chat_id") or trade["tracking_message_id"] is None:
             return
         ok = await self.publisher.edit(
             trade["tracking_message_id"], self.render(trade, closed_reason, stale_note)
