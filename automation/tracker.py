@@ -170,12 +170,25 @@ class Tracker:
             return closed
         if reason in {"STOP_LOSS_30", "STOP_LOSS_50"} and self.s.flags.stop_loss_card:
             await self.send_stop_loss_card(closed)
+        if closed.get('publication_chat_id') and reason not in {'STOP_LOSS_30','STOP_LOSS_50'}:
+            await self.send_public_exit(closed)
         if (
             self.s.flags.highest_card
             and self.s.tracking.highest_card_trigger == "on_close"
         ):
             await self.send_highest_card(closed)
         return closed
+
+    async def send_public_exit(self, trade):
+        reason = {'PROTECTED_STOP':'تفعيل حماية الصفقة', 'SESSION_END':'نهاية الجلسة',
+                  'MANUAL_CLOSE':'إغلاق المتابعة بطلب الإدارة'}.get(trade['close_reason'],'إنهاء المتابعة')
+        bid = trade['current_bid']
+        price_text = f'${Decimal(bid):.2f}' if bid is not None else 'غير متاح'
+        return await self.publisher.text_once('trade',trade['id'],'TRADE_EXIT',
+            f"🦋 <b>QUIET ALPHA — خروج من الصفقة</b>\n\n<b>{label_for(trade)}</b>\n"
+            f"سعر الدخول: <b>${Decimal(trade['approved_entry']):.2f}</b>\n"
+            f"آخر Bid مرصود: <b>{price_text}</b>\nالسبب: {reason}\nتم إغلاق متابعة العقد.",
+            payload={'bid':str(bid),'reason':trade['close_reason']})
 
     async def send_breakeven_exit(self, trade) -> Optional[int]:
         from .telegram_ui import breakeven_exit_text
