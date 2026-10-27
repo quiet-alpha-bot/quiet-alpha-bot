@@ -1,4 +1,4 @@
-"""Leader-only hourly 0DTE liquidity radar, ledgered and restart-safe."""
+"""Leader-only half-hourly 0DTE liquidity radar, ledgered and restart-safe."""
 from __future__ import annotations
 
 import asyncio
@@ -95,10 +95,12 @@ def report_slot(now, market):
     closed = et_datetime(et_date(now), market.close_et)
     if now < opened or now >= closed:
         return None
-    slot = int((now - opened).total_seconds() // 3600)
-    due = opened + timedelta(hours=slot)
-    # Only the current slot is eligible, but it remains retryable throughout
-    # its hour. A restart after minute ten must not silence the radar.
+    interval = int((now - opened).total_seconds() // 1800)
+    due = opened + timedelta(minutes=30 * interval)
+    # Preserve existing hourly ledger/report IDs when deploying mid-session.
+    # New intervening half-hours use a disjoint range; no old report is reused.
+    slot = interval // 2 if interval % 2 == 0 else 100 + interval // 2
+    # Retry only within the current half-hour; restarts do not resend SENT slots.
     return et_date(now), slot, due, opened
 
 
