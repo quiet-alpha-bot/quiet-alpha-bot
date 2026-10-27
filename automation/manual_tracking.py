@@ -9,6 +9,7 @@ from html import escape
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
 from . import queries as q
+from . import channel_routing as routing
 from .milestones import milestone_level, new_milestones, is_success
 from .occ import OccSymbol, parse_occ, strike_text
 from .timeutil import utcnow, et_date, et_datetime, within_session
@@ -118,6 +119,12 @@ class ManualTracking:
                 InlineKeyboardButton('✅ نشر بالقناة الحالية وبدء التتبع', callback_data=f'qam:start:{pid}'),
                 InlineKeyboardButton('❌ إلغاء', callback_data=f'qam:cancel:{pid}'),
             ]])
+            if routing.enabled():
+                keyboard = InlineKeyboardMarkup([[
+                    InlineKeyboardButton('🌐 العامة',callback_data=f'qam:public:{pid}'),
+                    InlineKeyboardButton('🔒 الخاصة',callback_data=f'qam:private:{pid}'),
+                    InlineKeyboardButton('❌ إلغاء',callback_data=f'qam:cancel:{pid}'),
+                ]])
             # Do not store a private message id in proposals.message_id: existing
             # maintenance edits that field using the publishing channel's chat id.
             await update.message.reply_text(
@@ -126,7 +133,7 @@ class ManualTracking:
                 f'الانتهاء: <b>{occ.expiry.isoformat()}</b>\n'
                 f'سعر دخولك: <b>${entry:.2f}</b>\n'
                 f'مستوى النجاح: <b>${entry + self.rt.settings.tracking.success_premium_gain:.2f}</b>\n\n'
-                'التأكيد ينشر بطاقة العقد في القناة الحالية ويبدأ التتبع بسعر دخولك المكتوب.\n'
+                'اختيار النشر يبدأ التتبع بسعر دخولك المكتوب.\n'
                 'الأرقام تُرصد من بدء المتابعة، ولا تشمل حركة العقد السابقة.\n'
                 'المعاينة صالحة لمدة 5 دقائق.', parse_mode='HTML', reply_markup=keyboard)
         except ValueError as error:
@@ -148,7 +155,7 @@ class ManualTracking:
             or now >= et_datetime(proposal['expiry'], s.tracking.stop_time_et)):
             raise ValueError('بدء التتبع اليدوي متاح أثناء جلسة السوق وقبل وقت إنهاء التتبع.')
 
-    async def confirm(self, proposal_id, user_id, chat_id):
+    async def confirm(self, proposal_id, user_id, chat_id, publication_chat_id=None):
         """Atomically approve and register; no Telegram I/O inside the transaction."""
         self._available()
         rt = self.rt
@@ -156,6 +163,10 @@ class ManualTracking:
         self._check_request(proposal, user_id, chat_id)
         if proposal['status'] == 'APPROVED':
             return await rt.db.fetchrow(q.TRADE_BY_PROPOSAL, proposal_id), False
+        if routing.enabled() and publication_chat_id is None:
+            raise ValueError('اختاري العامة أو الخاصة؛ أعيدي إرسال الأمر إن كانت المعاينة قديمة.')
+        if publication_chat_id:
+            await routing.check_permission(rt.app.bot,publication_chat_id,rt.settings.signal_chat_id)
         if proposal['status'] != 'PENDING_APPROVAL' or proposal['expires_at'] <= utcnow():
             raise ValueError('انتهت صلاحية الطلب أو تمت معالجته؛ أرسلي طلبًا جديدًا.')
         self._session(proposal, utcnow())
@@ -182,6 +193,8 @@ class ManualTracking:
                     raise ValueError('يوجد عقد مفتوح بنفس الاسترايك والاتجاه؛ لم تُسجل صفقة مكررة.')
                 if await conn.fetchval(q.COUNT_TRACKING_DIRECTION, proposal['direction']) >= 6:
                     raise ValueError('وصلت الصفقات المفتوحة في هذا الاتجاه إلى 6؛ لم تُضف صفقة جديدة.')
+                if publication_chat_id:
+                    await conn.execute(routing.SET_MANUAL_CHANNEL,proposal_id,publication_chat_id)
                 if await conn.fetchval(q.APPROVE_MANUAL_PROPOSAL, proposal_id, user_id) is None:
                     raise ValueError('انتهت صلاحية الطلب؛ أرسلي طلبًا جديدًا.')
                 signal = await conn.fetchrow(q.GET_SIGNAL, proposal['signal_db_id'])
@@ -225,7 +238,7 @@ class ManualTracking:
         try:
             _, action, pid = query.data.split(':')
             pid = int(pid)
-            if action not in ('start', 'cancel'):
+            if action not in ('start', 'cancel', 'public', 'private'):
                 raise ValueError('إجراء غير صالح.')
             await query.answer('جارٍ التحقق…')
             user_id, chat_id = update.effective_user.id, query.message.chat.id
@@ -238,7 +251,10 @@ class ManualTracking:
                     raise ValueError('تمت معالجة الطلب بالفعل؛ الإلغاء هنا لا يغلق صفقة مفتوحة.')
                 await query.edit_message_text('أُلغي طلب العقد اليدوي. لم تُضف صفقة إلى الإحصائية.')
                 return
-            trade, created = await self.confirm(pid, user_id, chat_id)
+            if action in ('public','private') and not routing.enabled():
+                raise ValueError('اختيار القنوات غير مفعّل.')
+            chosen = routing.destination(action) if action in ('public','private') else None
+            trade, created = await self.confirm(pid, user_id, chat_id,chosen)
             if trade is None:
                 raise RuntimeError('Approved manual request has no trade')
             # Durable registration precedes delivery. Leader tick retries failed
@@ -251,7 +267,8 @@ class ManualTracking:
             await query.edit_message_text(
                 f"✅ {'تم تسجيل' if created else 'سبق تسجيل'} العقد اليدوي — صفقة #{trade['id']}\n"
                 f"{trade['option_symbol']}\nسعر الدخول: ${Decimal(trade['approved_entry']):.2f}\n"
-                'تُرسل البطاقة والتحديثات إلى القناة الحالية. تابعي حالة التتبع عبر /qa_status.')
+                f"قناة النشر: {routing.channel_name(trade.get('publication_chat_id'))}. "
+                'تابعي حالة التتبع عبر /qa_status.')
         except ValueError as error:
             await query.message.reply_text(str(error))
         except Exception:
