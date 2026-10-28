@@ -34,9 +34,12 @@ async def check_permission(bot, chat_id, admin_chat):
 
 
 async def trade_destination(db, entity_type, entity_id, event_type, admin_chat):
-    if entity_type != 'trade' or event_type not in PUBLIC_EVENTS:
+    if entity_type != 'trade' or (event_type not in PUBLIC_EVENTS and event_type != 'TRADE_EXIT'):
         return admin_chat
     trade = await db.fetchrow(q.GET_TRADE,entity_id)
+    if event_type == 'TRADE_EXIT' and (not trade or trade.get('close_reason') not in
+            {'OWNER_EXIT','OWNER_EXIT_EXCLUDED','OWNER_EXIT_FLAT'}):
+        return admin_chat
     # Existing trades have NULL and keep their original admin destination.
     return (trade.get('publication_chat_id') if trade else None) or admin_chat
 
