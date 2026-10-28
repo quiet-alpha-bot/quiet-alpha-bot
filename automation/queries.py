@@ -31,7 +31,7 @@ CLAIM_SIGNAL = """
 UPDATE signals
 SET status = 'PROCESSING', processing_started_at = now(), updated_at = now()
 WHERE id = $1 AND status = 'RECEIVED'
-RETURNING id, signal_id, direction, event_type, ticker, timeframe,
+RETURNING id, signal_id, source, direction, event_type, ticker, timeframe,
           tv_price, signal_time, received_at, payload
 """
 
@@ -66,7 +66,7 @@ GET_SIGNAL = "SELECT * FROM signals WHERE id = $1"
 SIGNALS_BEFORE_WATCH = """
 SELECT id, direction, signal_time FROM signals
 WHERE signal_time >= $1 AND signal_time < $2
-  AND source <> 'manual'
+  AND source NOT IN ('manual','autonomous','alternative')
 ORDER BY signal_time
 """
 
@@ -434,7 +434,7 @@ ORDER BY t.closed_at LIMIT 50
 """
 LATEST_DIRECTION_SIGNAL = """
 SELECT * FROM signals WHERE signal_time >= $1 AND signal_time <= $2
-AND ticker IS NOT DISTINCT FROM $3 AND source <> 'manual'
+AND ticker IS NOT DISTINCT FROM $3 AND source NOT IN ('manual','autonomous','alternative')
 ORDER BY signal_time DESC, id DESC LIMIT 1
 """
 
