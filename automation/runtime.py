@@ -32,6 +32,7 @@ from .manual_tracking import ManualTracking
 from .manual_exit import ManualExit
 from .contract_support import ContractSupport
 from .company_radar import CompanyRadar
+from .opening_prayer import OpeningPrayer, enabled as prayer_enabled
 from .autonomous import AutonomousOpportunities, SPXRadar, enabled as opportunity_enabled
 from .cards import CardRenderers, Publisher
 from .config import Settings, load_settings
@@ -78,6 +79,7 @@ class AutomationRuntime:
         self.approval = ApprovalHandler(self)
         self.manual = ManualTracking(self)
         self.manual_exit = ManualExit(self)
+        self.opening_prayer = OpeningPrayer(self)
         self._tasks: set[asyncio.Task] = set()
         self._leader_children: list[asyncio.Task] = []
         self._leader_task: Optional[asyncio.Task] = None
@@ -238,6 +240,8 @@ class AutomationRuntime:
             self._leader_children = [
                 asyncio.create_task(self._maintenance_loop(), name="qa-maintenance")
             ]
+            if prayer_enabled():
+                self._leader_children.append(asyncio.create_task(self.opening_prayer.run(), name="qa-opening-prayer"))
             f = self.settings.flags
             if f.liquidity_radar and self.radar is not None:
                 self._leader_children.append(asyncio.create_task(self.radar.run(), name="qa-radar"))
@@ -413,6 +417,9 @@ class AutomationRuntime:
             lines.append("Contract support: enabled · once after success · checks every 60s")
             if self.contract_support.last_error:
                 lines.append(f"Contract support data: {self.contract_support.last_error}")
+        lines.append(f"Opening prayer: {'enabled' if prayer_enabled() else 'disabled'} · 16:15 Riyadh · owner approval required")
+        if self.opening_prayer.last_error:
+            lines.append(f"Opening prayer data: {self.opening_prayer.last_error}")
         if self.opportunities is not None:
             lines.append(f"Reentry watch: {'enabled' if opportunity_enabled('REENTRY') else 'disabled'} · previous entry + configured tolerance · approval required")
             lines.append(f"SPX unusual radar: {'enabled' if opportunity_enabled('SPX_RADAR') else 'disabled'} · 0DTE · $1M / 5m · >=3x · approval required")
@@ -604,6 +611,7 @@ def setup_automation(application: Application, renderers: CardRenderers) -> Opti
     application.add_handler(
         CallbackQueryHandler(runtime.approval.on_callback, pattern=r"^qa:")
     )
+    application.add_handler(CallbackQueryHandler(runtime.opening_prayer.callback, pattern=r"^qad:"))
     application.add_handler(CommandHandler("qa_track", runtime.manual.command))
     application.add_handler(CommandHandler("qa_exit", runtime.manual_exit.command))
     application.add_handler(CallbackQueryHandler(runtime.manual.callback, pattern=r"^qam:"))
