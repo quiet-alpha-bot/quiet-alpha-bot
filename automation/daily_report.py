@@ -31,13 +31,23 @@ def _peak_result(trade) -> Decimal:
     return (Decimal(highest) - entry) * Decimal("100")
 
 
+def _included(trades):
+    return [t for t in trades if t.get("close_reason") != "OWNER_EXIT_EXCLUDED"]
+
+
+def _result(trade, success_dollars):
+    peak = _peak_result(trade)
+    reason = trade.get("close_reason")
+    if reason in {"BREAKEVEN_EXIT", "OWNER_EXIT_FLAT"} or (reason == "OWNER_EXIT" and peak < success_dollars):
+        if trade["current_bid"] is not None:
+            return (Decimal(trade["current_bid"]) - Decimal(trade["approved_entry"])) * 100
+    return peak
+
+
 def summarize_daily_trades(trades: Sequence, success_dollars: Decimal) -> dict:
-    neutral = [t["close_reason"] == "BREAKEVEN_EXIT" for t in trades]
-    results = [
-        ((Decimal(t["current_bid"]) - Decimal(t["approved_entry"])) * Decimal("100"))
-        if flat and t["current_bid"] is not None else _peak_result(t)
-        for t, flat in zip(trades, neutral)
-    ]
+    trades = _included(trades)
+    neutral = [t["close_reason"] in {"BREAKEVEN_EXIT", "OWNER_EXIT_FLAT"} for t in trades]
+    results = [_result(t, success_dollars) for t in trades]
     wins = sum(result >= success_dollars and not flat for result, flat in zip(results, neutral))
     losses = len(results) - wins - sum(neutral)
     positive = sum((max(result, Decimal("0")) for result in results), Decimal("0"))
@@ -106,6 +116,7 @@ def daily_report_text(
     success_premium_gain: Decimal,
     preview: bool = False,
 ) -> tuple[str, dict]:
+    trades = _included(trades)
     success_dollars = success_premium_gain * Decimal("100")
     summary = summarize_daily_trades(trades, success_dollars)
     title = "📊 <b>QUIET ALPHA — البيان اليومي</b>"
@@ -134,16 +145,17 @@ def daily_report_text(
         ):
             entry = Decimal(trade["approved_entry"])
             highest = trade["highest_bid"]
-            flat = trade["close_reason"] == "BREAKEVEN_EXIT"
+            flat = trade["close_reason"] in {"BREAKEVEN_EXIT", "OWNER_EXIT_FLAT"}
+            manual_loss = trade["close_reason"] == "OWNER_EXIT" and _peak_result(trade) < success_dollars
             won = result >= success_dollars and not flat
             label = (
                 f"{strike_text(Decimal(trade['strike']))} {trade['direction']}"
             )
             lines.append(
                 f"{index}. {'⚖️' if flat else ('✅' if won else '❌')} <code>{escape(label)} | "
-                f"{money(entry)} → {money(trade['current_bid']) if flat else (money(highest) if highest is not None else '—')} "
+                f"{money(entry)} → {money(trade['current_bid']) if flat or manual_loss else (money(highest) if highest is not None else '—')} "
                 f"| {_signed_usd(result)}</code>"
-                + (" — خروج على رأس المال" if flat else "")
+                + (" — خروج على رأس المال" if flat else (" — إيقاف بقرار الإدارة؛ السعر المعروض سعر الإغلاق" if manual_loss else ""))
             )
             lines.append(trade_timing(trade))
         if len(trades) > 30:
