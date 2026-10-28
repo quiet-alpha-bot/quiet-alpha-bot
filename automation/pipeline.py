@@ -135,6 +135,7 @@ class SignalPipeline:
         self.uw = uw
         self.publisher = publisher
         self.liquidity = liquidity
+        self.autonomous = None
 
     # -----------------------------------------------------
     async def process(self, signal_db_id: int) -> None:
@@ -159,6 +160,10 @@ class SignalPipeline:
 
     # -----------------------------------------------------
     async def classify(self, row) -> tuple[Optional[MatchResult], Optional[bool], dict]:
+        if row.get("source") == "autonomous":
+            result = MatchResult(Classification.UW_ONLY, None, (), ())
+            await self.db.execute(q.SET_SIGNAL_CLASSIFICATION, row["id"], result.classification.value)
+            return result, True, {}
         if not self.s.flags.matching:
             return None, None, {}
         signal_time = row["signal_time"]
@@ -238,7 +243,8 @@ class SignalPipeline:
     # -----------------------------------------------------
     async def _process(self, row) -> None:
         direction = Direction(row["direction"])
-        requires_flow = self.s.flags.flow_selection or bool(self._signal_payload(row).get("alternative_count"))
+        requires_flow = (row.get("source") == "autonomous" or self.s.flags.flow_selection
+                         or bool(self._signal_payload(row).get("alternative_count")))
         signal_time = row["signal_time"]
 
         result, watch_active, watch_rows = await self.classify(row)
@@ -280,6 +286,8 @@ class SignalPipeline:
                 await self._finish_run(run_id, "SKIPPED", reason,
                                        ticker, expiry, spot, [], None, meta)
                 return
+            if row.get("source") == "autonomous":
+                quotes = [qt for qt in quotes if qt.symbol in snapshot.contracts]
             selection = select_with_flow(quotes, direction, expiry, self.s.uw.contract_root,
                                          self.s.selection, utcnow(), snapshot, spot, excluded_strikes=blocked_strikes)
         else:
@@ -303,7 +311,7 @@ class SignalPipeline:
             if entry_result.decision is EntryDecision.ENTER:
                 break
             overpriced = latest is not None and latest.ask is not None and latest.ask > self.s.selection.premium_max
-            if not (requires_flow and overpriced
+            if not (requires_flow and row.get("source") != "autonomous" and overpriced
                     and attempts < self.s.selection.alternative_attempts):
                 await self._finish_run(run_id, "SKIPPED", entry_result.reason, ticker, expiry,
                                        spot, selection.candidates, chosen.symbol, meta)
@@ -344,7 +352,8 @@ class SignalPipeline:
                 [latest], direction, expiry, self.s.uw.contract_root,
                 self.s.selection, utcnow(), snapshot, spot,
             )
-            if verification is None or verification.selected is None:
+            if (verification is None or verification.selected is None
+                or not await self.quote_matches_trigger(row, latest)):
                 await self._finish_run(run_id, "SKIPPED", "PRE_PROPOSAL_RECHECK_FAILED", ticker,
                                        expiry, spot, selection.candidates, chosen.symbol, meta)
                 await self._finish(row, SignalStatus.SKIPPED, "PRE_PROPOSAL_RECHECK_FAILED")
@@ -366,11 +375,15 @@ class SignalPipeline:
             reasons.insert(0, "الأقوى حسب صافي تدفقات الشراء الحديثة بين العقود المؤهلة")
             if attempts or self._signal_payload(row).get("alternative_count"):
                 reasons.insert(0, "استرايك بديل بعد خروج سعر العقد السابق عن نطاق الطرح")
+        if row.get("source") == "autonomous":
+            reasons.insert(0, "عودة السعر والزخم والسيولة بعد إغلاق صفقة ناجحة" if row["event_type"] == "REENTRY"
+                           else "رادار عقود اليوم؛ العقد المرشح اجتاز فحص السيولة والزخم الخاص به")
         live_confirmation = None
         if requires_flow:
             tv_strength, uw_strength, composite_strength, uw_aligned = live_proposal_strengths(row, snapshot)
             live_confirmation = {
-                "window_minutes": self.s.selection.flow_window_minutes,
+                "autonomous": row.get("source") == "autonomous",
+                "window_minutes": 5 if row.get("source") == "autonomous" else self.s.selection.flow_window_minutes,
                 "direction": row["direction"],
                 "directional": str(snapshot.market_directional),
                 "start": snapshot.start.isoformat(), "end": snapshot.end.isoformat(),
@@ -476,6 +489,11 @@ class SignalPipeline:
 
     async def _confirmed_flow(self, row):
         flow_rejection_reason.set("سبب غير محدد")
+        if row.get("source") == "autonomous":
+            if self.autonomous is None:
+                return reject_flow("رصد الفرص المستقلة غير متاح")
+            snapshot = await self.autonomous.validate(row)
+            return snapshot if snapshot is not None else reject_flow("لم تتأكد عودة السعر والزخم والسيولة للعقد")
         if self.liquidity is None:
             return reject_flow("مصدر التدفقات غير متصل")
         now = utcnow()
@@ -525,9 +543,16 @@ class SignalPipeline:
             )
         return replace(snapshot, indicator_strength=strength)
 
+    async def quote_matches_trigger(self, row, quote):
+        if row.get("source") != "autonomous":
+            return True
+        return self.autonomous is not None and await self.autonomous.accepts_quote(row, quote)
+
     async def propose_alternative(self, proposal):
         """A new proposal requires a NEW owner approval; old buttons cannot approve it."""
         row = await self.db.fetchrow(q.GET_SIGNAL, proposal["signal_db_id"])
+        if row.get("source") == "autonomous":
+            return None  # This trigger authorizes only its individually verified contract.
         payload = dict(self._signal_payload(row))
         count = int(payload.get("alternative_count", 0))
         if count >= self.s.selection.alternative_attempts or await self._confirmed_flow(row) is None:
