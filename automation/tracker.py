@@ -182,6 +182,16 @@ class Tracker:
         return closed
 
     async def send_public_exit(self, trade):
+        if trade['close_reason'] in {'OWNER_EXIT','OWNER_EXIT_EXCLUDED','OWNER_EXIT_FLAT'}:
+            entry, bid = Decimal(trade['approved_entry']), Decimal(trade['current_bid'])
+            result = (bid - entry) * 100
+            signed = f"{'+' if result >= 0 else '−'}${abs(result):.2f}"
+            return await self.publisher.text_once('trade',trade['id'],'TRADE_EXIT',
+                f"🦋 <b>QUIET ALPHA — إغلاق الصفقة</b>\n\n<b>{label_for(trade)}</b>\n"
+                f"رقم الصفقة: <b>#{trade['id']}</b>\nسعر الدخول: <b>${entry:.2f}</b>\n"
+                f"سعر الإغلاق المرصود: <b>${bid:.2f}</b>\nنتيجة العقد: <b>{signed}</b>\n\n"
+                "تم إيقاف الصفقة بقرار الإدارة، ونترقّب فرصة جديدة عند اكتمال شروط الدخول.",
+                payload={'bid':str(bid),'reason':trade['close_reason']})
         reason = {'PROTECTED_STOP':'تفعيل حماية الصفقة', 'SESSION_END':'نهاية الجلسة',
                   'MANUAL_CLOSE':'إغلاق المتابعة بطلب الإدارة'}.get(trade['close_reason'],'إنهاء المتابعة')
         bid = trade['current_bid']
@@ -499,7 +509,7 @@ class Tracker:
             q.INSERT_PRICE_OBSERVATION, trade_id, now, quote.bid, quote.ask, quote.last,
             quote.volume, quote.open_interest, quote.last_tape_time, latency, changed, None,
         )
-        await self.db.execute(
+        updated = await self.db.execute(
             q.UPDATE_TRADE_QUOTE, trade_id,
             state.current_bid, state.current_ask, state.current_last,
             state.highest_bid, state.highest_bid_time, state.highest_mid,
@@ -507,6 +517,8 @@ class Tracker:
             now, quote.last_tape_time,
         )
 
+        if updated == "UPDATE 0":
+            return  # An owner exit closed this trade while the quote was in flight.
         entry = Decimal(trade["approved_entry"])
         significant = False
 
