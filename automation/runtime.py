@@ -32,6 +32,7 @@ from .manual_tracking import ManualTracking
 from .manual_exit import ManualExit
 from .contract_support import ContractSupport
 from .company_radar import CompanyRadar
+from .autonomous import AutonomousOpportunities, SPXRadar, enabled as opportunity_enabled
 from .cards import CardRenderers, Publisher
 from .config import Settings, load_settings
 from .db import Database, LeaderLock
@@ -71,6 +72,8 @@ class AutomationRuntime:
         self.radar = None
         self.contract_support = None
         self.company_radar = None
+        self.spx_radar = None
+        self.opportunities = None
         self.webhook: Optional[WebhookServer] = None
         self.approval = ApprovalHandler(self)
         self.manual = ManualTracking(self)
@@ -135,6 +138,11 @@ class AutomationRuntime:
             self.contract_support = ContractSupport(s, self.db, self.publisher, self.liquidity)
             self.company_radar = CompanyRadar(s, self.db, self.publisher, self.uw)
         self.pipeline = SignalPipeline(s, self.db, self.uw, self.publisher, self.liquidity)
+        if self.uw is not None:
+            self.spx_radar = SPXRadar(s, self.db, self.publisher, self.uw)
+            self.opportunities = AutonomousOpportunities(s, self.db, self.uw, self.liquidity,
+                                                         self.pipeline, self._schedule_signal)
+            self.pipeline.autonomous = self.opportunities
         self.tracker = Tracker(s, self.db, self.uw, self.publisher, self.renderers)
         if self.uw is not None:
             self.watch = WatchEngine(s, self.db, self.uw, self.publisher)
@@ -235,6 +243,10 @@ class AutomationRuntime:
                 self._leader_children.append(asyncio.create_task(self.radar.run(), name="qa-radar"))
             if f.liquidity_radar and self.company_radar is not None:
                 self._leader_children.append(asyncio.create_task(self.company_radar.run(), name="qa-company-radar"))
+            if opportunity_enabled('SPX_RADAR') and self.spx_radar is not None:
+                self._leader_children.append(asyncio.create_task(self.spx_radar.run(), name="qa-spx-unusual"))
+            if self.opportunities is not None and (opportunity_enabled('REENTRY') or opportunity_enabled('SPX_RADAR')):
+                self._leader_children.append(asyncio.create_task(self.opportunities.run(), name="qa-opportunities"))
             if f.tracking and self.contract_support is not None:
                 self._leader_children.append(asyncio.create_task(self.contract_support.run(), name="qa-contract-support"))
             if f.uw_watch and self.watch is not None:
@@ -401,6 +413,15 @@ class AutomationRuntime:
             lines.append("Contract support: enabled · once after success · checks every 60s")
             if self.contract_support.last_error:
                 lines.append(f"Contract support data: {self.contract_support.last_error}")
+        if self.opportunities is not None:
+            lines.append(f"Reentry watch: {'enabled' if opportunity_enabled('REENTRY') else 'disabled'} · previous entry + configured tolerance · approval required")
+            lines.append(f"SPX unusual radar: {'enabled' if opportunity_enabled('SPX_RADAR') else 'disabled'} · 0DTE · $1M / 5m · >=3x · approval required")
+            if self.opportunities.last_error:
+                lines.append(f"Opportunity data: {self.opportunities.last_error}")
+            if opportunity_enabled('SPX_RADAR') and self.spx_radar is not None:
+                lines.append(f"SPX radar check: {self.spx_radar.last_check_at or 'waiting'} · checked {self.spx_radar.scanned} · insufficient history {self.spx_radar.insufficient_history}")
+                if self.spx_radar.last_error:
+                    lines.append(f"SPX radar data: {self.spx_radar.last_error}")
         if self.company_radar is not None and self.settings.flags.liquidity_radar:
             monitor = self.company_radar
             lines.append("Company radar: enabled · 10 stocks · all expiries · $1M / 5m · activity >=3x")
