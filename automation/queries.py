@@ -297,6 +297,7 @@ LEFT JOIN events AS e ON e.entity_type = 'trade' AND e.entity_id = t.id
 WHERE (t.approval_time AT TIME ZONE 'America/New_York')::date = $1
   AND p.status = 'APPROVED'
   AND t.status IN ('TRACKING', 'CLOSED')
+  AND t.close_reason IS DISTINCT FROM 'OWNER_EXIT_EXCLUDED'
 ORDER BY t.approval_time, t.id
 """
 
@@ -320,7 +321,7 @@ UPDATE trades
 SET highest_milestone_reached = GREATEST(highest_milestone_reached, $2),
     milestone_detections = $3::jsonb || milestone_detections,
     updated_at = now()
-WHERE id = $1
+WHERE id = $1 AND status = 'TRACKING'
 """
 
 SET_TRADE_MILESTONE = """
@@ -331,7 +332,7 @@ WHERE id = $1
 
 MARK_SUCCESS_DETECTED = """
 UPDATE trades SET success_detected_at = $2, success_bid = $3, updated_at = now()
-WHERE id = $1 AND success_detected_at IS NULL
+WHERE id = $1 AND status = 'TRACKING' AND success_detected_at IS NULL
 RETURNING id
 """
 
@@ -497,4 +498,32 @@ WHERE id = $1
 SET_ALTERNATIVE_CHANNEL = """
 UPDATE proposals SET publication_chat_id=$2, updated_at=now()
 WHERE id=$1 AND status='PENDING_APPROVAL' AND publication_chat_id IS NULL
+"""
+
+LOCK_EXIT_TRADE = "SELECT * FROM trades WHERE id=$1 FOR UPDATE"
+OWNER_CLOSE_TRADE = """
+UPDATE trades SET status='CLOSED', close_reason=$7, closed_at=$5,
+ current_bid=$2, current_ask=$3, current_last=$4,
+ highest_bid_time=CASE WHEN highest_bid IS NULL OR $2 > highest_bid THEN $5 ELSE highest_bid_time END,
+ highest_bid=GREATEST(highest_bid,$2),
+ lowest_bid_time=CASE WHEN lowest_bid IS NULL OR $2 < lowest_bid THEN $5 ELSE lowest_bid_time END,
+ lowest_bid=LEAST(lowest_bid,$2),
+ success_detected_at=CASE WHEN success_detected_at IS NULL AND GREATEST(highest_bid,$2)>=approved_entry+$8
+                         THEN COALESCE(CASE WHEN highest_bid >= approved_entry+$8 THEN highest_bid_time END,$5)
+                         ELSE success_detected_at END,
+ success_bid=CASE WHEN success_detected_at IS NULL AND GREATEST(highest_bid,$2)>=approved_entry+$8
+                  THEN GREATEST(highest_bid,$2) ELSE success_bid END,
+ last_poll_at=$5, last_tape_time=$6, last_error=NULL, updated_at=now()
+WHERE id=$1 AND status='TRACKING'
+RETURNING *
+"""
+PENDING_OWNER_EXITS = """
+SELECT t.* FROM trades t
+WHERE t.status='CLOSED' AND t.close_reason IN ('OWNER_EXIT','OWNER_EXIT_EXCLUDED','OWNER_EXIT_FLAT')
+AND (NOT EXISTS (SELECT 1 FROM events e WHERE e.entity_type='trade' AND e.entity_id=t.id
+ AND e.event_type='TRADE_EXIT' AND (e.status<>'FAILED' OR e.attempts>=3))
+ OR (t.success_detected_at IS NOT NULL AND NOT EXISTS
+ (SELECT 1 FROM events e WHERE e.entity_type='trade' AND e.entity_id=t.id
+ AND e.event_type='HIGHEST_CARD' AND (e.status<>'FAILED' OR e.attempts>=3))))
+ORDER BY t.closed_at LIMIT 50
 """
