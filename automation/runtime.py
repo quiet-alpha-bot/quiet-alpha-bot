@@ -29,6 +29,7 @@ from . import queries as q
 from . import channel_routing as routing
 from .approval import ApprovalHandler
 from .manual_tracking import ManualTracking
+from .manual_exit import ManualExit
 from .contract_support import ContractSupport
 from .company_radar import CompanyRadar
 from .cards import CardRenderers, Publisher
@@ -73,6 +74,7 @@ class AutomationRuntime:
         self.webhook: Optional[WebhookServer] = None
         self.approval = ApprovalHandler(self)
         self.manual = ManualTracking(self)
+        self.manual_exit = ManualExit(self)
         self._tasks: set[asyncio.Task] = set()
         self._leader_children: list[asyncio.Task] = []
         self._leader_task: Optional[asyncio.Task] = None
@@ -288,6 +290,10 @@ class AutomationRuntime:
                     except Exception:
                         pass
             await self.publisher.text(f"⌛ Proposal #{proposal['id']} EXPIRED")
+        for trade in await db.fetch(q.PENDING_OWNER_EXITS):
+            await self.tracker.send_public_exit(trade)
+            if self.settings.flags.highest_card:
+                await self.tracker.send_highest_card(trade)
         await self._send_daily_report_if_due()
         # Retry definite closing-card failures even after the trade leaves TRACKING.
         for trade in await db.fetch(routing.PENDING_CLOSE_PUBLICATIONS):
@@ -578,6 +584,7 @@ def setup_automation(application: Application, renderers: CardRenderers) -> Opti
         CallbackQueryHandler(runtime.approval.on_callback, pattern=r"^qa:")
     )
     application.add_handler(CommandHandler("qa_track", runtime.manual.command))
+    application.add_handler(CommandHandler("qa_exit", runtime.manual_exit.command))
     application.add_handler(CallbackQueryHandler(runtime.manual.callback, pattern=r"^qam:"))
     application.add_handler(CommandHandler("qa_status", runtime.cmd_status))
     application.add_handler(CommandHandler("qa_channels", runtime.cmd_channels))
