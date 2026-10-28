@@ -208,7 +208,9 @@ class ApprovalHandler:
                 [quote], Direction(proposal["direction"]), proposal["expiry"],
                 s.uw.contract_root, s.selection, utcnow(), snapshot,
             )
-            if selection is None or selection.selected is None:
+            if (selection is None or selection.selected is None
+                or (signal.get("source") == "autonomous"
+                    and not await rt.pipeline.quote_matches_trigger(signal, quote))):
                 await rt.db.execute(q.REVERT_APPROVAL, proposal_id)
                 await rt.publisher.text("لم تعد شروط الاتجاه والتدفقات وجودة السعر مكتملة؛ لم تُعتمد الصفقة.")
                 return
