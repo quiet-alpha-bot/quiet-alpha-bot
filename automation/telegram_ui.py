@@ -144,11 +144,12 @@ def proposal_text(
     status = UW_STATUS_TEXT.get(classification, classification or "—")
     if watch_engine_active is False and classification == "INDICATOR_ONLY":
         status = "— UW WATCH غير نشط وقت الإشارة"
+    autonomous = bool(live_confirmation and live_confirmation.get("autonomous"))
     lines = [
         "🦋 <b>QUIET ALPHA — TRADE PROPOSAL</b>",
         "",
         f"Direction: <b>{escape(direction)}</b>",
-        ("Source: TradingView + UW Current Flow" if live_confirmation else f"Source: {escape(classification or 'N/A')}"),
+        ("Source: UW · زخم العقد وتدفقاته، بدون إشارة مؤشر جديدة" if autonomous else "Source: TradingView + UW Current Flow" if live_confirmation else f"Source: {escape(classification or 'N/A')}"),
         (f"UW Confirmation: ✅ التدفقات الحالية تؤكد {escape(direction)} · آخر {live_confirmation['window_minutes']} دقائق"
          if live_confirmation else f"UW Confirmation: {escape(status)}"),
     ]
@@ -186,7 +187,7 @@ def proposal_text(
     )
     if reasons:
         lines.append("Selection: " + escape(" · ".join(reasons)))
-    if live_confirmation:
+    if live_confirmation and not autonomous:
         lines.append("مطابقة UW WATCH المنفصلة: " + escape(status))
         if uw_context:
             lines.append("سياق WATCH: " + escape(uw_context))
