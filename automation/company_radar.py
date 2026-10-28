@@ -147,6 +147,10 @@ def company_text(symbol, start, end, values, average, now):
 
 
 class CompanyRadar:
+    latest_query = LATEST
+    insert_query = INSERT
+    render_text = staticmethod(company_text)
+
     def __init__(self, settings, db, publisher, uw):
         self.s, self.db, self.publisher, self.uw = settings, db, publisher, uw
         self.last_error = None
@@ -265,7 +269,7 @@ class CompanyRadar:
         if (not within_session(now,self.s.market.open_et,self.s.market.close_et)
             or measure(bars,start,end,now) is None or not 0 <= (now-end).total_seconds() <= 120):
             return
-        previous = await self.db.fetchrow(LATEST,et_date(end),symbol)
+        previous = await self.db.fetchrow(self.latest_query,et_date(end),symbol)
         if previous is not None:
             if 0 <= (now-previous['window_end']).total_seconds() <= 120:
                 # Frozen text/evidence; retry definite delivery failures only.
@@ -279,9 +283,9 @@ class CompanyRadar:
                    'premium':str(values['premium']),'volume':values['volume'],
                    'ask':str(values['ask']),'bid':str(values['bid']),
                    'baseline':str(average),'baseline_days':[str(d) for d,_ in self._history[symbol]]}
-        row = await self.db.fetchrow(INSERT,et_date(end),symbol,
+        row = await self.db.fetchrow(self.insert_query,et_date(end),symbol,
                     0 if previous is None else previous['level']+1,
-                    start,end,values['premium'],company_text(symbol,start,end,values,average,now),payload)
+                    start,end,values['premium'],self.render_text(symbol,start,end,values,average,now),payload)
         if row is not None:
             await self.send(row)
 
