@@ -69,8 +69,15 @@ class Minute:
 def minutes(payload, symbol, day):
     result = {}
     for row in data_rows(payload):
-        if row.get('option_symbol') != symbol:
-            raise DataIssue('CONTRACT_MISMATCH')
+        actual = row.get('option_symbol')
+        if actual != symbol:
+            # Only schema names and valid contract IDs: never dump raw API data.
+            keys = ','.join(sorted(k for k in row if isinstance(k,str)
+                                  and k.replace('_','').isalnum())[:20])
+            if actual is None or actual == '':
+                raise DataIssue(f'CONTRACT_SYMBOL_MISSING expected={symbol}; fields={keys}')
+            received = actual if isinstance(actual,str) and parse_occ(actual) is not None else 'INVALID_SYMBOL'
+            raise DataIssue(f'CONTRACT_MISMATCH expected={symbol}; received={received}')
         at = parse_ts(row.get('start_time'))
         if at is None or et_date(at) != day or at.second or at.microsecond:
             raise DataIssue('INVALID_MINUTE_TIME')
@@ -167,7 +174,7 @@ class CompanyRadar:
             except asyncio.CancelledError:
                 raise
             except Exception as error:
-                self.last_error = getattr(error,'kind',type(error).__name__)
+                self.last_error = str(error) if isinstance(error,DataIssue) else getattr(error,'kind',type(error).__name__)
                 logger.exception('Company radar cycle failed')
             await asyncio.sleep(POLL_SECONDS)
 
