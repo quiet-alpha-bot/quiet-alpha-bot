@@ -435,8 +435,8 @@ class SignalPipeline:
 
         channel = self._signal_payload(row).get("publication_chat_id") if self._signal_payload(row).get("alternative_count") else None
         if channel:
-            from .channel_routing import PUBLIC_CHAT, PRIVATE_CHAT
-            if channel not in (PUBLIC_CHAT, PRIVATE_CHAT):
+            from .channel_routing import PUBLIC_CHAT, PRIVATE_CHAT, BOTH_CHATS
+            if channel not in (PUBLIC_CHAT, PRIVATE_CHAT, BOTH_CHATS):
                 raise ValueError("Invalid inherited publication channel")
             await self.db.execute(q.SET_ALTERNATIVE_CHANNEL, proposal["id"], channel)
 
