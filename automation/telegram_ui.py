@@ -21,6 +21,7 @@ CB_RECONFIRM = "rc"
 CB_CANCEL = "cn"
 CB_PUBLIC = "pub"
 CB_PRIVATE = "priv"
+CB_BOTH = "both"
 
 
 def callback_data(action: str, proposal_id: int) -> str:
@@ -33,15 +34,15 @@ def parse_callback(data: Optional[str]) -> Optional[tuple[str, int]]:
     parts = data.split(":")
     if len(parts) != 3 or parts[0] != CB_PREFIX or not parts[2].isdigit():
         return None
-    if parts[1] not in {CB_APPROVE, CB_REJECT, CB_RECONFIRM, CB_CANCEL, CB_PUBLIC, CB_PRIVATE}:
+    if parts[1] not in {CB_APPROVE, CB_REJECT, CB_RECONFIRM, CB_CANCEL, CB_PUBLIC, CB_PRIVATE, CB_BOTH}:
         return None
     return parts[1], int(parts[2])
 
 
 def proposal_keyboard(proposal_id: int, publication_chat_id=None) -> InlineKeyboardMarkup:
-    from .channel_routing import enabled, PUBLIC_CHAT, PRIVATE_CHAT, channel_name
-    if publication_chat_id in (PUBLIC_CHAT, PRIVATE_CHAT):
-        action = CB_PUBLIC if publication_chat_id == PUBLIC_CHAT else CB_PRIVATE
+    from .channel_routing import enabled, PUBLIC_CHAT, PRIVATE_CHAT, BOTH_CHATS, channel_name
+    if publication_chat_id in (PUBLIC_CHAT, PRIVATE_CHAT, BOTH_CHATS):
+        action = CB_BOTH if publication_chat_id == BOTH_CHATS else CB_PUBLIC if publication_chat_id == PUBLIC_CHAT else CB_PRIVATE
         return InlineKeyboardMarkup([[
             InlineKeyboardButton(f"✅ تأكيد البديل في {channel_name(publication_chat_id)}",
                                  callback_data=callback_data(action, proposal_id)),
@@ -51,6 +52,7 @@ def proposal_keyboard(proposal_id: int, publication_chat_id=None) -> InlineKeybo
         return InlineKeyboardMarkup([[
             InlineKeyboardButton('🌐 العامة',callback_data=callback_data(CB_PUBLIC,proposal_id)),
             InlineKeyboardButton('🔒 الخاصة',callback_data=callback_data(CB_PRIVATE,proposal_id)),
+            InlineKeyboardButton('📣 الاثنتان',callback_data=callback_data(CB_BOTH,proposal_id)),
             InlineKeyboardButton('❌ رفض',callback_data=callback_data(CB_REJECT,proposal_id)),
         ]])
     return InlineKeyboardMarkup(
