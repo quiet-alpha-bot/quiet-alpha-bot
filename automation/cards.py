@@ -37,7 +37,7 @@ from telegram.error import BadRequest, Forbidden, NetworkError, RetryAfter, Time
 
 from .db import Database
 from .models import money
-from .channel_routing import trade_destination
+from .channel_routing import trade_destination, BOTH_CHATS, PUBLIC_CHAT, PRIVATE_CHAT, event_for_channel
 from . import queries as q
 
 logger = logging.getLogger("quiet-alpha.cards")
@@ -93,17 +93,17 @@ class Publisher:
         self.chat_id = chat_id
         self.db = db
 
-    async def publication_ready(self, entity_type, entity_id, event_type, target):
+    async def publication_ready(self, entity_type, entity_id, event_type, target, entry_event="ENTRY_CARD"):
         if entity_type != 'trade' or str(target) == str(self.chat_id) or event_type == 'ENTRY_CARD':
             return True
-        entry = await self.db.fetchrow(q.EVENT_STATUS,'trade',entity_id,'ENTRY_CARD',0)
+        entry = await self.db.fetchrow(q.EVENT_STATUS,'trade',entity_id,entry_event,0)
         return entry is not None and entry['status'] == 'SENT'
 
-    async def entry_reply(self, entity_type, entity_id, event_type, target):
+    async def entry_reply(self, entity_type, entity_id, event_type, target, entry_event="ENTRY_CARD"):
         """Resolve this trade's original card from the durable delivery ledger."""
         if entity_type != 'trade' or event_type == 'ENTRY_CARD':
             return {}
-        entry = await self.db.fetchrow(q.EVENT_STATUS, 'trade', entity_id, 'ENTRY_CARD', 0)
+        entry = await self.db.fetchrow(q.EVENT_STATUS, 'trade', entity_id, entry_event, 0)
         if not entry or entry['status'] != 'SENT':
             return {}
         message_id = entry.get('message_id')
@@ -124,6 +124,8 @@ class Publisher:
             if not trade:
                 return {}
             entry_chat = trade.get('publication_chat_id') or self.chat_id
+            if entry_chat == BOTH_CHATS:
+                entry_chat = PRIVATE_CHAT if entry_event.endswith('_PRIVATE') else PUBLIC_CHAT
         if str(entry_chat) != str(target):
             return {}  # Never attach an admin update to another channel's ID.
         return dict(reply_to_message_id=message_id, allow_sending_without_reply=True)
@@ -183,16 +185,21 @@ class Publisher:
         max_attempts: int = 3,
         chat_id: Optional[str] = None,
     ) -> Optional[int]:
-        target = chat_id or await trade_destination(self.db,entity_type,entity_id,event_type,self.chat_id)
-        if not await self.publication_ready(entity_type,entity_id,event_type,target):
-            return None
-        reply = await self.entry_reply(entity_type,entity_id,event_type,target)
-        async def send_to(chat):
-            return await self.bot.send_message(chat_id=chat,text=text,parse_mode=ParseMode.HTML,
-                                               reply_markup=reply_markup, **reply)
-        result = await self._deliver(
-            entity_type,entity_id,event_type,level,
-            dict(payload or {},publication_chat_id=str(target)),lambda:send_to(target),max_attempts)
+        route = chat_id or await trade_destination(self.db,entity_type,entity_id,event_type,self.chat_id)
+        targets = (PUBLIC_CHAT,PRIVATE_CHAT) if route == BOTH_CHATS else (route,)
+        result = None
+        for target in targets:
+            event = event_for_channel(event_type,target,route)
+            entry_event = event_for_channel('ENTRY_CARD',target,route)
+            if not await self.publication_ready(entity_type,entity_id,event_type,target,entry_event):
+                continue
+            reply = await self.entry_reply(entity_type,entity_id,event_type,target,entry_event)
+            async def send_to():
+                return await self.bot.send_message(chat_id=target,text=text,parse_mode=ParseMode.HTML,
+                                                   reply_markup=reply_markup, **reply)
+            sent = await self._deliver(entity_type,entity_id,event,level,
+                dict(payload or {},publication_chat_id=str(target)),send_to,max_attempts)
+            result = result or sent
         return result
 
     async def photo_once(
@@ -205,23 +212,24 @@ class Publisher:
         payload: Optional[dict] = None,
         max_attempts: int = 3,
     ) -> Optional[int]:
-        target = await trade_destination(self.db,entity_type,entity_id,event_type,self.chat_id)
-        if not await self.publication_ready(entity_type,entity_id,event_type,target):
-            return None
-        reply = await self.entry_reply(entity_type,entity_id,event_type,target)
-        async def send(chat):
-            card = await asyncio.to_thread(render)
-            try:
-                return await self.bot.send_photo(
-                    chat_id=chat, photo=card, **PHOTO_TIMEOUTS, **reply
-                )
-            finally:
-                card.close()
-
-        result = await self._deliver(
-            entity_type, entity_id, event_type, level,
-            dict(payload or {},publication_chat_id=str(target)),lambda:send(target),max_attempts
-        )
+        route = await trade_destination(self.db,entity_type,entity_id,event_type,self.chat_id)
+        targets = (PUBLIC_CHAT,PRIVATE_CHAT) if route == BOTH_CHATS else (route,)
+        result = None
+        for target in targets:
+            event = event_for_channel(event_type,target,route)
+            entry_event = event_for_channel('ENTRY_CARD',target,route)
+            if not await self.publication_ready(entity_type,entity_id,event_type,target,entry_event):
+                continue
+            reply = await self.entry_reply(entity_type,entity_id,event_type,target,entry_event)
+            async def send():
+                card = await asyncio.to_thread(render)
+                try:
+                    return await self.bot.send_photo(chat_id=target,photo=card,**PHOTO_TIMEOUTS,**reply)
+                finally:
+                    card.close()
+            sent = await self._deliver(entity_type,entity_id,event,level,
+                dict(payload or {},publication_chat_id=str(target)),send,max_attempts)
+            result = result or sent
         return result
 
     async def text(self, text: str, reply_markup: Optional[InlineKeyboardMarkup] = None) -> Optional[int]:
