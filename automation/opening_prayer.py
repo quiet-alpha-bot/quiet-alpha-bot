@@ -25,7 +25,7 @@ INSERT='''INSERT INTO opening_prayers(market_date,caption,asset_sha256,public_ch
 VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT(market_date) DO NOTHING'''
 GET_DAY='SELECT * FROM opening_prayers WHERE market_date=$1'
 GET='SELECT * FROM opening_prayers WHERE id=$1'
-DECIDE='''UPDATE opening_prayers SET status=$2,decided_by=$3,decided_at=now()
+DECIDE='''UPDATE opening_prayers SET status=$2,decided_by=$3,decided_at=now(),publication_choice=$5
 WHERE id=$1 AND status='PENDING' AND expires_at>$4 RETURNING *'''
 EXPIRE="UPDATE opening_prayers SET status='EXPIRED' WHERE expires_at<=$1 AND status='PENDING'"
 
@@ -43,10 +43,21 @@ def window(now,market):
     return (day,end) if due<=now<end else None
 
 
-def keyboard(ident):
+def keyboard(ident, prefix='qad'):
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton('✅ نشر في العامة والخاصة',callback_data=f'qad:publish:{ident}')],
-        [InlineKeyboardButton('❌ تخطي اليوم',callback_data=f'qad:skip:{ident}')]])
+        [InlineKeyboardButton('🌐 العامة',callback_data=f'{prefix}:public:{ident}'),
+         InlineKeyboardButton('🔒 الخاصة',callback_data=f'{prefix}:private:{ident}')],
+        [InlineKeyboardButton('📣 الاثنتان',callback_data=f'{prefix}:both:{ident}'),
+         InlineKeyboardButton('❌ إلغاء',callback_data=f'{prefix}:skip:{ident}')]])
+
+
+def destinations(row):
+    choice=row.get('publication_choice','both')
+    if choice not in ('public','private','both'):
+        raise ValueError('Invalid publication choice')
+    return [(event,row[key]) for event,key,side in
+            [('PUBLIC','public_chat_id','public'),('PRIVATE','private_chat_id','private')]
+            if choice in (side,'both')]
 
 
 class OpeningPrayer:
@@ -109,7 +120,7 @@ class OpeningPrayer:
     async def publish(self,row):
         if not enabled() or row['status']!='APPROVED' or utcnow()>=row['expires_at']:
             return
-        for event,chat in [('PUBLIC',row['public_chat_id']),('PRIVATE',row['private_chat_id'])]:
+        for event,chat in destinations(row):
             await self.photo(row,event,chat)
 
     async def callback(self,update,context):
@@ -137,7 +148,7 @@ class OpeningPrayer:
             await query.answer('استخدمي معاينة قناة الإدارة.',show_alert=True);return
         try:
             prefix,action,ident=query.data.split(':')
-            if prefix!='qad' or action not in ('publish','skip'):
+            if prefix!='qad' or action not in ('publish','public','private','both','skip'):
                 raise ValueError
             ident=int(ident)
         except (ValueError,TypeError):
@@ -148,24 +159,24 @@ class OpeningPrayer:
         if row['status']!='PENDING':
             await query.answer('تم تسجيل القرار مسبقًا.',show_alert=True);return
         # A changed asset must never be published on approval of an older preview.
-        if action=='publish' and hashlib.sha256(ASSET.read_bytes()).hexdigest()!=row['asset_sha256']:
+        if action!='skip' and hashlib.sha256(ASSET.read_bytes()).hexdigest()!=row['asset_sha256']:
             await query.answer('تغيّرت صورة البطاقة؛ لم يتم النشر.',show_alert=True);return
-        row=await rt.db.fetchrow(DECIDE,ident,'APPROVED' if action=='publish' else 'SKIPPED',user.id,utcnow())
+        row=await rt.db.fetchrow(DECIDE,ident,'APPROVED' if action!='skip' else 'SKIPPED',user.id,utcnow(), 'both' if action in ('publish','skip') else action)
         if row is None:
             await query.answer('تم تسجيل القرار أو انتهت المهلة.',show_alert=True);return
-        await query.answer('تمت الموافقة، جارٍ النشر.' if action=='publish' else 'تم تخطي اليوم.')
+        await query.answer('تمت الموافقة، جارٍ النشر.' if action!='skip' else 'تم تخطي اليوم.')
         try:
             await query.edit_message_reply_markup(reply_markup=None)
         except Exception:
             log.info('Prayer preview buttons already removed or unavailable')
-        if action=='publish':
+        if action!='skip':
             await self.publish(row)
             states=[]
-            for event in ('PUBLIC','PRIVATE'):
+            for event,_ in destinations(row):
                 state=await rt.db.fetchrow(q.EVENT_STATUS,'opening_prayer',ident,event,0)
                 states.append(state['status'] if state else 'PENDING')
-            if states==['SENT','SENT']:
-                await rt.publisher.text_once('opening_prayer',ident,'RESULT','✅ نُشرت بطاقة الدعاء في العامة والخاصة.')
+            if states and all(state=='SENT' for state in states):
+                await rt.publisher.text_once('opening_prayer',ident,'RESULT','✅ نُشرت بطاقة الدعاء في الوجهة المختارة.')
             else:
                 await rt.publisher.text_once('opening_prayer',ident,'RESULT_PENDING',
-                    'سُجلت موافقتك، لكن لم يتأكد النشر في القناتين بعد. لن نكرر أي إرسال غير محسوم.')
+                    'سُجلت موافقتك، لكن لم يتأكد النشر في كل الوجهات المختارة بعد. لن نكرر أي إرسال غير محسوم.')
