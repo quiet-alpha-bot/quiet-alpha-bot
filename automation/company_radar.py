@@ -166,6 +166,19 @@ class CompanyRadar:
         self.insufficient_history = 0
         self._history = {}
         self._day = None
+        self._scan_order = {}
+        self._scan_serial = 0
+
+    def scan_batch(self, ticker, symbols, limit=60):
+        # Least recently attempted first; stable discovery order breaks ties.
+        previous = self._scan_order.get(ticker, {})
+        previous = {symbol: previous.get(symbol, 0) for symbol in symbols}
+        self._scan_order[ticker] = previous
+        return sorted(previous, key=previous.get)[:limit]
+
+    def mark_attempt(self, ticker, symbol):
+        self._scan_serial += 1
+        self._scan_order[ticker][symbol] = self._scan_serial
 
     async def run(self):
         while True:
@@ -246,9 +259,13 @@ class CompanyRadar:
         for ticker in TICKERS:
             try:
                 symbols = await self.candidates(ticker,utcnow())
-                if len(symbols) > 60:
-                    raise DataIssue('COMPANY_CONTRACT_BUDGET')
-                for symbol in symbols:
+                for symbol in self.scan_batch(ticker, symbols):
+                    current = utcnow()
+                    if not within_session(current,self.s.market.open_et,self.s.market.close_et):
+                        return
+                    end = current.replace(second=0,microsecond=0)
+                    start = end-timedelta(minutes=5)
+                    self.mark_attempt(ticker, symbol)
                     try:
                         await self.check(symbol,start,end)
                         self.scanned += 1
