@@ -289,11 +289,14 @@ RECENT_TRADES = "SELECT * FROM trades ORDER BY id DESC LIMIT $1"
 
 DAILY_TRADES = """
 SELECT t.*, (e.payload->>'telegram_sent_at')::timestamptz AS published_at,
-       e.message_id AS entry_message_id
+       e.message_id AS entry_message_id, ep.message_id AS private_entry_message_id,
+       (ep.payload->>'telegram_sent_at')::timestamptz AS private_published_at
 FROM trades AS t
 JOIN proposals AS p ON p.id = t.proposal_id
 LEFT JOIN events AS e ON e.entity_type = 'trade' AND e.entity_id = t.id
     AND e.event_type = 'ENTRY_CARD' AND e.level = 0 AND e.status = 'SENT'
+LEFT JOIN events AS ep ON ep.entity_type='trade' AND ep.entity_id=t.id
+    AND ep.event_type='ENTRY_CARD_PRIVATE' AND ep.level=0 AND ep.status='SENT'
 WHERE (t.approval_time AT TIME ZONE 'America/New_York')::date = $1
   AND p.status = 'APPROVED'
   AND t.status IN ('TRACKING', 'CLOSED')
@@ -457,7 +460,7 @@ RETURNING id
 
 PENDING_ORDERED_MILESTONE = """
 SELECT level FROM events
-WHERE entity_type = 'trade' AND entity_id = $1 AND event_type = 'MILESTONE'
+WHERE entity_type = 'trade' AND entity_id = $1 AND event_type IN ('MILESTONE','MILESTONE_PRIVATE')
   AND status <> 'SENT'
 ORDER BY level LIMIT 1
 """
