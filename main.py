@@ -893,138 +893,35 @@ async def start_command(
 # أمر CALL
 # =========================================================
 
-async def call_command(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-) -> None:
-
-    if update.message is None:
+async def tracked_short_command(update, context, direction: str) -> None:
+    """Short commands share qa_track's preview, routing and confirmation flow."""
+    if update.message is None or not await ensure_owner(update):
         return
-
-    if not await ensure_owner(update):
-        return
-
+    command = 'c' if direction == 'CALL' else 'p'
     if len(context.args) != 2:
         await update.message.reply_text(
-            "❌ الاستخدام الصحيح:\n\n"
-            "/c 7555 3.90"
-        )
+            f'الاستخدام: /{command} 7770 3.70\n'
+            'الاسترايك ثم سعر دخولك. تظهر معاينة لاختيار قناة النشر.')
         return
-
-    try:
-        strike = format_strike(
-            context.args[0]
-        )
-
-        premium = format_premium(
-            context.args[1]
-        )
-
-        await publish_signal(
-            context=context,
-            signal_type="CALL",
-            strike=strike,
-            premium=premium,
-        )
-
-        await update.message.reply_text(
-            "✅ تم إنشاء ونشر بطاقة CALL."
-        )
-
-    except (ValueError, TypeError):
-        await update.message.reply_text(
-            "❌ الاسترايك وسعر العقد "
-            "يجب أن يكونا أرقامًا صحيحة."
-        )
-
-    except FileNotFoundError as error:
-        logger.exception(
-            "CALL template was not found"
-        )
-
-        await update.message.reply_text(
-            "❌ لم أجد قالب CALL.\n"
-            f"{error}"
-        )
-
-    except Exception as error:
-        logger.exception(
-            "Failed to publish CALL card"
-        )
-
-        await update.message.reply_text(
-            "❌ تعذر إنشاء بطاقة CALL.\n"
-            f"نوع الخطأ: {type(error).__name__}"
-        )
-
-
-# =========================================================
-# أمر PUT
-# =========================================================
-
-async def put_command(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-) -> None:
-
-    if update.message is None:
+    runtime = context.application.bot_data.get('quiet_alpha_runtime')
+    if runtime is None:
+        await update.message.reply_text('التتبع غير جاهز حاليًا؛ لم تُنشر بطاقة. أعيدي المحاولة بعد تشغيل التتبع.')
         return
-
-    if not await ensure_owner(update):
+    from automation import channel_routing
+    if not channel_routing.enabled():
+        await update.message.reply_text('اختيار قنوات النشر غير مفعّل؛ لم تُنشر بطاقة ولم يبدأ التتبع.')
         return
+    from types import SimpleNamespace
+    args = [runtime.settings.uw.contract_root, context.args[0], direction, context.args[1]]
+    await runtime.manual.command(update, SimpleNamespace(args=args))
 
-    if len(context.args) != 2:
-        await update.message.reply_text(
-            "❌ الاستخدام الصحيح:\n\n"
-            "/p 7555 3.90"
-        )
-        return
 
-    try:
-        strike = format_strike(
-            context.args[0]
-        )
+async def call_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await tracked_short_command(update, context, 'CALL')
 
-        premium = format_premium(
-            context.args[1]
-        )
 
-        await publish_signal(
-            context=context,
-            signal_type="PUT",
-            strike=strike,
-            premium=premium,
-        )
-
-        await update.message.reply_text(
-            "✅ تم إنشاء ونشر بطاقة PUT."
-        )
-
-    except (ValueError, TypeError):
-        await update.message.reply_text(
-            "❌ الاسترايك وسعر العقد "
-            "يجب أن يكونا أرقامًا صحيحة."
-        )
-
-    except FileNotFoundError as error:
-        logger.exception(
-            "PUT template was not found"
-        )
-
-        await update.message.reply_text(
-            "❌ لم أجد قالب PUT.\n"
-            f"{error}"
-        )
-
-    except Exception as error:
-        logger.exception(
-            "Failed to publish PUT card"
-        )
-
-        await update.message.reply_text(
-            "❌ تعذر إنشاء بطاقة PUT.\n"
-            f"نوع الخطأ: {type(error).__name__}"
-        )
+async def put_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await tracked_short_command(update, context, 'PUT')
 
 
 # =========================================================
