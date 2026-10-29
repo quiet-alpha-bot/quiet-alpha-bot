@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import json
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
@@ -98,6 +99,35 @@ class Publisher:
         entry = await self.db.fetchrow(q.EVENT_STATUS,'trade',entity_id,'ENTRY_CARD',0)
         return entry is not None and entry['status'] == 'SENT'
 
+    async def entry_reply(self, entity_type, entity_id, event_type, target):
+        """Resolve this trade's original card from the durable delivery ledger."""
+        if entity_type != 'trade' or event_type == 'ENTRY_CARD':
+            return {}
+        entry = await self.db.fetchrow(q.EVENT_STATUS, 'trade', entity_id, 'ENTRY_CARD', 0)
+        if not entry or entry['status'] != 'SENT':
+            return {}
+        message_id = entry.get('message_id')
+        if not isinstance(message_id, int) or isinstance(message_id, bool) or message_id <= 0:
+            return {}
+        payload = entry.get('payload') or {}
+        if isinstance(payload, str):
+            try:
+                payload = json.loads(payload)
+            except (ValueError, TypeError):
+                return {}
+        if not isinstance(payload, dict):
+            return {}
+        entry_chat = payload.get('publication_chat_id')
+        if entry_chat is None:
+            # Older ledger rows predate destination metadata.
+            trade = await self.db.fetchrow(q.GET_TRADE, entity_id)
+            if not trade:
+                return {}
+            entry_chat = trade.get('publication_chat_id') or self.chat_id
+        if str(entry_chat) != str(target):
+            return {}  # Never attach an admin update to another channel's ID.
+        return dict(reply_to_message_id=message_id, allow_sending_without_reply=True)
+
     async def _deliver(
         self,
         entity_type: str,
@@ -156,9 +186,10 @@ class Publisher:
         target = chat_id or await trade_destination(self.db,entity_type,entity_id,event_type,self.chat_id)
         if not await self.publication_ready(entity_type,entity_id,event_type,target):
             return None
+        reply = await self.entry_reply(entity_type,entity_id,event_type,target)
         async def send_to(chat):
             return await self.bot.send_message(chat_id=chat,text=text,parse_mode=ParseMode.HTML,
-                                               reply_markup=reply_markup)
+                                               reply_markup=reply_markup, **reply)
         result = await self._deliver(
             entity_type,entity_id,event_type,level,
             dict(payload or {},publication_chat_id=str(target)),lambda:send_to(target),max_attempts)
@@ -177,11 +208,12 @@ class Publisher:
         target = await trade_destination(self.db,entity_type,entity_id,event_type,self.chat_id)
         if not await self.publication_ready(entity_type,entity_id,event_type,target):
             return None
+        reply = await self.entry_reply(entity_type,entity_id,event_type,target)
         async def send(chat):
             card = await asyncio.to_thread(render)
             try:
                 return await self.bot.send_photo(
-                    chat_id=chat, photo=card, **PHOTO_TIMEOUTS
+                    chat_id=chat, photo=card, **PHOTO_TIMEOUTS, **reply
                 )
             finally:
                 card.close()
