@@ -124,9 +124,12 @@ class SPXRadar(CompanyRadar):
         self.last_check_at=now; self.last_error=None
         self.scanned=self.insufficient_history=0
         symbols=await self.candidates('SPX',now)
-        if len(symbols)>60:
-            raise DataIssue('SPX_CONTRACT_BUDGET')
-        for symbol in symbols:
+        for symbol in self.scan_batch('SPX', symbols):
+            current = utcnow()
+            if not within_session(current,self.s.market.open_et,self.s.market.close_et):
+                return
+            end=current.replace(second=0,microsecond=0); start=end-timedelta(minutes=5)
+            self.mark_attempt('SPX', symbol)
             try:
                 await self.check(symbol,start,end); self.scanned+=1
             except DataIssue as error:
