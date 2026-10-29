@@ -33,6 +33,7 @@ from .manual_exit import ManualExit
 from .contract_support import ContractSupport
 from .company_radar import CompanyRadar
 from .opening_prayer import OpeningPrayer, enabled as prayer_enabled
+from .closing_message import ClosingMessage, enabled as closing_enabled
 from .autonomous import AutonomousOpportunities, SPXRadar, enabled as opportunity_enabled
 from .cards import CardRenderers, Publisher
 from .config import Settings, load_settings
@@ -80,6 +81,7 @@ class AutomationRuntime:
         self.manual = ManualTracking(self)
         self.manual_exit = ManualExit(self)
         self.opening_prayer = OpeningPrayer(self)
+        self.closing_message = ClosingMessage(self)
         self._tasks: set[asyncio.Task] = set()
         self._leader_children: list[asyncio.Task] = []
         self._leader_task: Optional[asyncio.Task] = None
@@ -240,6 +242,8 @@ class AutomationRuntime:
             self._leader_children = [
                 asyncio.create_task(self._maintenance_loop(), name="qa-maintenance")
             ]
+            if closing_enabled():
+                self._leader_children.append(asyncio.create_task(self.closing_message.run(), name="qa-closing-message"))
             if prayer_enabled():
                 self._leader_children.append(asyncio.create_task(self.opening_prayer.run(), name="qa-opening-prayer"))
             f = self.settings.flags
@@ -395,7 +399,8 @@ class AutomationRuntime:
             f"Tracking trades: {len(trades)}",
             f"Last UW watch observation: {last_obs.isoformat() if last_obs else '—'}",
         ]
-        lines.append('Channels: '+('enabled · public/private selection' if routing.enabled() else 'admin only for new trades'))
+        lines.append('Channels: '+('enabled · public/private/both selection' if routing.enabled() else 'admin only for new trades'))
+        lines.append(f"Approval price tolerance: ${self.settings.approval.confirmation_tolerance_abs} · configured price range enforced")
         if self.uw is not None:
             lines.append(
                 f"UW requests (this process): {self.uw.request_count} · "
@@ -418,6 +423,9 @@ class AutomationRuntime:
             if self.contract_support.last_error:
                 lines.append(f"Contract support data: {self.contract_support.last_error}")
         lines.append(f"Opening prayer: {'enabled' if prayer_enabled() else 'disabled'} · 16:15 Riyadh · owner approval required")
+        lines.append(f"Closing message: {'enabled' if closing_enabled() else 'disabled'} · after channel report · owner approval required")
+        if self.closing_message.last_error:
+            lines.append(f"Closing message data: {self.closing_message.last_error}")
         if self.opening_prayer.last_error:
             lines.append(f"Opening prayer data: {self.opening_prayer.last_error}")
         if self.opportunities is not None:
@@ -612,6 +620,7 @@ def setup_automation(application: Application, renderers: CardRenderers) -> Opti
         CallbackQueryHandler(runtime.approval.on_callback, pattern=r"^qa:")
     )
     application.add_handler(CallbackQueryHandler(runtime.opening_prayer.callback, pattern=r"^qad:"))
+    application.add_handler(CallbackQueryHandler(runtime.closing_message.callback, pattern=r"^qac:"))
     application.add_handler(CommandHandler("qa_track", runtime.manual.command))
     application.add_handler(CommandHandler("qa_exit", runtime.manual_exit.command))
     application.add_handler(CallbackQueryHandler(runtime.manual.callback, pattern=r"^qam:"))
