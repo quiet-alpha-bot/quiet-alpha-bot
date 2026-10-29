@@ -25,7 +25,7 @@ from .models import ProposalStatus, TradeStatus
 from .telegram_ui import (
     CB_APPROVE,
     CB_CANCEL,
-    CB_PUBLIC, CB_PRIVATE, proposal_keyboard,
+    CB_PUBLIC, CB_PRIVATE, CB_BOTH, proposal_keyboard,
     CB_RECONFIRM,
     CB_REJECT,
     contract_label,
@@ -78,12 +78,12 @@ class ApprovalHandler:
 
         action, proposal_id = parsed
         try:
-            if action in (CB_PUBLIC, CB_PRIVATE):
+            if action in (CB_PUBLIC, CB_PRIVATE, CB_BOTH):
                 if not routing.enabled():
                     await query.answer('اختيار القنوات غير مفعّل.',show_alert=True)
                     return
                 await self._approve(query, proposal_id, ProposalStatus.PENDING_APPROVAL, user.id,
-                                    routing.destination('public' if action == CB_PUBLIC else 'private'))
+                                    routing.destination('both' if action == CB_BOTH else 'public' if action == CB_PUBLIC else 'private'))
             elif action == CB_APPROVE:
                 if routing.enabled():
                     await query.edit_message_reply_markup(reply_markup=proposal_keyboard(proposal_id))
@@ -216,7 +216,7 @@ class ApprovalHandler:
                 return
         in_range = s.selection.premium_min <= current <= s.selection.premium_max
         tolerance_ok = within_tolerance(
-            reference, current, s.approval.tolerance_abs, s.approval.tolerance_pct
+            reference, current, s.approval.confirmation_tolerance_abs, None
         )
 
         if tolerance_ok and (in_range or not s.approval.require_in_range):
