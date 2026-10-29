@@ -412,7 +412,7 @@ RETURNING id, entity_type, entity_id, event_type, level, status
 """
 
 EVENT_STATUS = """
-SELECT status, message_id, attempts FROM events
+SELECT status, message_id, attempts, payload FROM events
 WHERE entity_type = $1 AND entity_id = $2 AND event_type = $3 AND level = $4
 """
 
