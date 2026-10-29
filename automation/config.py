@@ -238,6 +238,7 @@ class ApprovalSettings:
     tolerance_pct: Optional[Decimal]
     proposal_expiry_seconds: Optional[int]
     require_in_range: bool
+    confirmation_tolerance_abs: Decimal = Decimal("0.30")
 
 
 @dataclass(frozen=True)
