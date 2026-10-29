@@ -117,13 +117,14 @@ class ManualTracking:
             pid = proposal['id']
             keyboard = InlineKeyboardMarkup([[
                 InlineKeyboardButton('✅ نشر بالقناة الحالية وبدء التتبع', callback_data=f'qam:start:{pid}'),
-                InlineKeyboardButton('❌ إلغاء', callback_data=f'qam:cancel:{pid}'),
+                InlineKeyboardButton('❌ رفض', callback_data=f'qam:cancel:{pid}'),
             ]])
             if routing.enabled():
                 keyboard = InlineKeyboardMarkup([[
                     InlineKeyboardButton('🌐 العامة',callback_data=f'qam:public:{pid}'),
                     InlineKeyboardButton('🔒 الخاصة',callback_data=f'qam:private:{pid}'),
-                    InlineKeyboardButton('❌ إلغاء',callback_data=f'qam:cancel:{pid}'),
+                    InlineKeyboardButton('📣 الاثنتان',callback_data=f'qam:both:{pid}'),
+                    InlineKeyboardButton('❌ رفض',callback_data=f'qam:cancel:{pid}'),
                 ]])
             # Do not store a private message id in proposals.message_id: existing
             # maintenance edits that field using the publishing channel's chat id.
@@ -238,7 +239,7 @@ class ManualTracking:
         try:
             _, action, pid = query.data.split(':')
             pid = int(pid)
-            if action not in ('start', 'cancel', 'public', 'private'):
+            if action not in ('start', 'cancel', 'public', 'private', 'both'):
                 raise ValueError('إجراء غير صالح.')
             await query.answer('جارٍ التحقق…')
             user_id, chat_id = update.effective_user.id, query.message.chat.id
@@ -251,9 +252,9 @@ class ManualTracking:
                     raise ValueError('تمت معالجة الطلب بالفعل؛ الإلغاء هنا لا يغلق صفقة مفتوحة.')
                 await query.edit_message_text('أُلغي طلب العقد اليدوي. لم تُضف صفقة إلى الإحصائية.')
                 return
-            if action in ('public','private') and not routing.enabled():
+            if action in ('public','private','both') and not routing.enabled():
                 raise ValueError('اختيار القنوات غير مفعّل.')
-            chosen = routing.destination(action) if action in ('public','private') else None
+            chosen = routing.destination(action) if action in ('public','private','both') else None
             trade, created = await self.confirm(pid, user_id, chat_id,chosen)
             if trade is None:
                 raise RuntimeError('Approved manual request has no trade')
