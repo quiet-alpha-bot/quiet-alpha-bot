@@ -66,10 +66,25 @@ class Minute:
     volume: int
 
 
-def minutes(payload, symbol, day):
+def minutes(payload, symbol, day, *, request_symbol=None):
+    # Missing row identity is allowed only for an exact-contract request.
+    if request_symbol is not None and (request_symbol != symbol
+            or not isinstance(symbol, str) or parse_occ(symbol) is None):
+        raise DataIssue('INVALID_CONTRACT_CONTEXT')
+    envelopes = [payload] if isinstance(payload, dict) else []
+    outer = payload.get('data') if isinstance(payload, dict) else None
+    if isinstance(outer, list) and len(outer) == 1 and isinstance(outer[0], dict) and isinstance(outer[0].get('data'), list):
+        envelopes.append(outer[0])
+    for envelope in envelopes:
+        actual = envelope.get('option_symbol')
+        if actual not in (None, '', symbol):
+            raise DataIssue('CONTRACT_MISMATCH expected=' + symbol + '; received=' +
+                            (actual if isinstance(actual, str) and parse_occ(actual) is not None else 'INVALID_SYMBOL'))
     result = {}
     for row in data_rows(payload):
         actual = row.get('option_symbol')
+        if actual in (None, '') and request_symbol == symbol:
+            actual = request_symbol
         if actual != symbol:
             # Only schema names and valid contract IDs: never dump raw API data.
             keys = ','.join(sorted(k for k in row if isinstance(k,str)
@@ -213,6 +228,13 @@ class CompanyRadar:
                 return sorted(found,key=found.get,reverse=True)
         raise DataIssue('COMPANY_CHAIN_PAGE_LIMIT')
 
+    async def contract_minutes(self, symbol, day):
+        if not isinstance(symbol, str) or parse_occ(symbol) is None:
+            raise DataIssue('INVALID_CONTRACT_CONTEXT')
+        response = await self.uw.get(f'/api/option-contract/{symbol}/intraday',
+                                     {'date': day.isoformat()})
+        return minutes(response.data, symbol, day, request_symbol=symbol)
+
     async def baseline(self, symbol, start, end):
         day = et_date(end)
         if symbol not in self._history:
@@ -220,9 +242,7 @@ class CompanyRadar:
             dates = historical_days(response.data, day)
             history = []
             for previous, daily_volume in dates:
-                response = await self.uw.get(f'/api/option-contract/{symbol}/intraday',
-                                             {'date':previous.isoformat()})
-                bars = minutes(response.data,symbol,previous)
+                bars = await self.contract_minutes(symbol, previous)
                 # A partial/empty history must never become a zero baseline.
                 if not bars or sum(m.volume for m in bars) != daily_volume:
                     raise DataIssue('INCOMPLETE_HISTORY')
@@ -281,8 +301,7 @@ class CompanyRadar:
     async def check(self, symbol, start, end):
         if not 0 <= (utcnow()-end).total_seconds() <= 120:
             return
-        response = await self.uw.get(f'/api/option-contract/{symbol}/intraday',{'date':et_date(end).isoformat()})
-        bars = minutes(response.data,symbol,et_date(end))
+        bars = await self.contract_minutes(symbol, et_date(end))
         values = measure(bars,start,end,utcnow())
         if values is None:
             return
