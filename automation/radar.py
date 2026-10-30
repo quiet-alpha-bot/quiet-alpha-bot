@@ -8,6 +8,7 @@ from decimal import Decimal
 from html import escape
 from zoneinfo import ZoneInfo
 
+from .radar_publication import keyboard as publication_keyboard
 from . import queries as q
 from .models import money
 from .occ import strike_text
@@ -163,5 +164,6 @@ class LiquidityRadar:
             text = saved["message_text"]
         await self.publisher.text_once("radar", ident, "LIQUIDITY_RADAR", text, level=slot,
                                        payload={"scope": "SPXW_0DTE", "slot": slot},
-                                       max_attempts=1000000)
+                                       max_attempts=1000000,
+                                       reply_markup=publication_keyboard('market',ident,slot))
         self.last_error = None
