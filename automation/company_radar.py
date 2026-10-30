@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from datetime import date, timedelta
 from decimal import Decimal, InvalidOperation
 
+from .radar_publication import keyboard as publication_keyboard
 from .occ import parse_occ, strike_text
 from .timeutil import utcnow, et_date, to_et, et_datetime, display_time, within_session
 from .models import parse_ts
@@ -334,4 +335,5 @@ class CompanyRadar:
 
     async def send(self, row):
         await self.publisher.text_once('company_radar',row['id'],EVENT,row['message_text'],
-                                       payload=row['payload'],max_attempts=3)
+                                       payload=row['payload'],max_attempts=3,
+                                       reply_markup=publication_keyboard('company',row['id']))
