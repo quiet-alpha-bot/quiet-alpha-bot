@@ -28,6 +28,7 @@ from telegram.ext import Application, CallbackQueryHandler, CommandHandler, Cont
 from . import queries as q
 from . import channel_routing as routing
 from .approval import ApprovalHandler
+from .radar_publication import RadarPublication
 from .manual_tracking import ManualTracking
 from .manual_exit import ManualExit
 from .contract_support import ContractSupport
@@ -78,6 +79,7 @@ class AutomationRuntime:
         self.opportunities = None
         self.webhook: Optional[WebhookServer] = None
         self.approval = ApprovalHandler(self)
+        self.radar_publication = RadarPublication(self)
         self.manual = ManualTracking(self)
         self.manual_exit = ManualExit(self)
         self.opening_prayer = OpeningPrayer(self)
@@ -619,6 +621,7 @@ def setup_automation(application: Application, renderers: CardRenderers) -> Opti
     application.add_handler(
         CallbackQueryHandler(runtime.approval.on_callback, pattern=r"^qa:")
     )
+    application.add_handler(CallbackQueryHandler(runtime.radar_publication.callback, pattern=r"^qar:"))
     application.add_handler(CallbackQueryHandler(runtime.opening_prayer.callback, pattern=r"^qad:"))
     application.add_handler(CallbackQueryHandler(runtime.closing_message.callback, pattern=r"^qac:"))
     application.add_handler(CommandHandler("qa_track", runtime.manual.command))
