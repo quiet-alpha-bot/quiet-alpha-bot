@@ -69,10 +69,10 @@ def breakeven_ready(entry, bid, lowest, highest, gain, drawdown) -> bool:
 
 
 def breakeven_approach_ready(entry, bid, lowest, highest, gain, drawdown) -> bool:
-    """Warn within 10% below entry after a strict drawdown, before success."""
+    """Warn within 30% below entry after a strict drawdown, before success."""
     return (entry > 0 and bid is not None and lowest is not None
             and highest is not None
-            and entry * Decimal("0.90") <= bid < entry
+            and entry * Decimal("0.70") <= bid < entry
             and highest < entry + gain
             and lowest < entry * (Decimal("1") - drawdown))
 
@@ -218,6 +218,16 @@ class Tracker:
         low = Decimal(trade["lowest_bid"])
         drawdown = (entry - low) / entry * Decimal("100")
         remaining = (entry - bid) / entry * Decimal("100")
+        # Preserve level=0 for the original 10% alert, including old trades.
+        threshold = 10 if remaining <= 10 else 20 if remaining <= 20 else 30
+        level = 0 if threshold == 10 else threshold
+        # A jump sends only the closest applicable band. Never send an older
+        # band after a retracement/restart, including uncertain deliveries.
+        closer_levels = (20, 0) if threshold == 30 else (0,) if threshold == 20 else ()
+        for closer in closer_levels:
+            for event in ('BREAKEVEN_APPROACH', 'BREAKEVEN_APPROACH_PRIVATE'):
+                if await self.db.fetchrow(q.EVENT_STATUS, 'trade', trade['id'], event, closer):
+                    return None
         text = (
             "🦋 <b>QUIET ALPHA — اقتراب من رأس المال</b>\n\n"
             f"<b>{label_for(trade)}</b>\n"
@@ -228,8 +238,9 @@ class Tracker:
             "واقترب من سعر الدخول. استعدوا للخروج عند العودة إلى رأس المال."
         )
         return await self.publisher.text_once(
-            "trade", trade["id"], "BREAKEVEN_APPROACH", text,
-            payload={"entry": str(entry), "bid": str(bid), "lowest_bid": str(low)},
+            "trade", trade["id"], "BREAKEVEN_APPROACH", text, level=level,
+            payload={"entry": str(entry), "bid": str(bid), "lowest_bid": str(low),
+                     "remaining_threshold_pct": threshold},
             max_attempts=ORDERED_EVENT_MAX_ATTEMPTS,
         )
 
@@ -278,6 +289,10 @@ class Tracker:
         if row is None:
             return False
         if row["status"] == "SENT":
+            trade = await self.db.fetchrow(q.GET_TRADE, trade_id)
+            if trade and trade.get('publication_chat_id') == 'both':
+                other = await self.db.fetchrow(q.EVENT_STATUS,"trade",trade_id,event_type+'_PRIVATE',level)
+                return bool(other and other['status']=='SENT')
             return True
         if row["status"] == "UNCERTAIN":
             logger.warning("Trade #%s %s %s is UNCERTAIN; later events are blocked",
