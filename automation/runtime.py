@@ -406,6 +406,10 @@ class AutomationRuntime:
             f"Tracking trades: {len(trades)}",
             f"Last UW watch observation: {last_obs.isoformat() if last_obs else '—'}",
         ]
+        lines.append(f"Tracking cadence: target {self.settings.tracking.poll_seconds}s · live message {self.settings.tracking.message_refresh_seconds}s")
+        cycle = getattr(self.tracker, 'last_cycle_seconds', None)
+        if cycle is not None:
+            lines.append(f"Last tracking cycle: {cycle:.2f}s")
         lines.append('Automatic entries: '+('paused for today' if await session_stopped(self.db) else 'enabled'))
         lines.append('Channels: '+('enabled · public/private/both selection' if routing.enabled() else 'admin only for new trades'))
         lines.append(f"Approval price tolerance: ${self.settings.approval.confirmation_tolerance_abs} · configured price range enforced")
