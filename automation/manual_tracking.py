@@ -27,6 +27,23 @@ USAGE = (
 )
 
 
+REFRESH_PRICE = """UPDATE proposals SET reconfirm_price=$2, updated_at=now()
+WHERE id=$1 AND classification='MANUAL' AND status='PENDING_APPROVAL' AND expires_at>now()
+AND reconfirm_price IS NOT DISTINCT FROM $3 RETURNING *"""
+
+class PriceChanged(ValueError):
+    def __init__(self, proposal, price):
+        self.proposal, self.price = proposal, price
+        super().__init__('تغيّر السعر؛ راجعي السعر الجديد ثم اختاري قناة النشر للتأكيد.')
+
+def manual_keyboard(pid, price):
+    options = [('🌐 العامة','public'),('🔒 الخاصة','private'),('📣 الاثنتان','both')] if routing.enabled() else [('✅ اعتماد وبدء التتبع','start')]
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton(label, callback_data=f'qam:{action}:{pid}:{price:.2f}')
+        for label,action in options
+    ] + [InlineKeyboardButton('❌ رفض',callback_data=f'qam:cancel:{pid}')]])
+
+
 def positive_number(value):
     try:
         result = Decimal(value)
@@ -120,17 +137,7 @@ class ManualTracking:
             occ = parse_occ(proposal['option_symbol'])
             entry = Decimal(proposal['suggested_entry'])
             pid = proposal['id']
-            keyboard = InlineKeyboardMarkup([[
-                InlineKeyboardButton('✅ نشر بالقناة الحالية وبدء التتبع', callback_data=f'qam:start:{pid}'),
-                InlineKeyboardButton('❌ رفض', callback_data=f'qam:cancel:{pid}'),
-            ]])
-            if routing.enabled():
-                keyboard = InlineKeyboardMarkup([[
-                    InlineKeyboardButton('🌐 العامة',callback_data=f'qam:public:{pid}'),
-                    InlineKeyboardButton('🔒 الخاصة',callback_data=f'qam:private:{pid}'),
-                    InlineKeyboardButton('📣 الاثنتان',callback_data=f'qam:both:{pid}'),
-                    InlineKeyboardButton('❌ رفض',callback_data=f'qam:cancel:{pid}'),
-                ]])
+            keyboard = manual_keyboard(pid, entry)
             # Do not store a private message id in proposals.message_id: existing
             # maintenance edits that field using the publishing channel's chat id.
             await update.message.reply_text(
@@ -139,7 +146,7 @@ class ManualTracking:
                 f'الانتهاء: <b>{occ.expiry.isoformat()}</b>\n'
                 f'سعر دخولك: <b>${entry:.2f}</b>\n'
                 f'مستوى النجاح: <b>${entry + self.rt.settings.tracking.success_premium_gain:.2f}</b>\n\n'
-                'اختيار النشر يبدأ التتبع بسعر دخولك المكتوب.\n'
+                'وقت الجلسة نراجع سعر الشراء الحالي قبل الاعتماد؛ إذا تغيّر نعرضه لتأكيدك.\n'
                 'الأرقام تُرصد من بدء المتابعة، ولا تشمل حركة العقد السابقة.\n'
                 'راجعي تاريخ الانتهاء أعلاه؛ خارج الجلسة يبدأ الرصد عند وصول سعر حي، دون احتساب أسعار سابقة.\n'
                 'المعاينة صالحة لمدة 5 دقائق.', parse_mode='HTML', reply_markup=keyboard)
@@ -159,7 +166,7 @@ class ManualTracking:
         if now >= et_datetime(proposal['expiry'], s.market.close_et):
             raise ValueError('العقد منتهي. حددي تاريخ انتهاء قادم عبر /qa_track.')
 
-    async def confirm(self, proposal_id, user_id, chat_id, publication_chat_id=None):
+    async def confirm(self, proposal_id, user_id, chat_id, publication_chat_id=None, displayed_price=None):
         """Atomically approve and register; no Telegram I/O inside the transaction."""
         self._available()
         rt = self.rt
@@ -182,6 +189,26 @@ class ManualTracking:
             now = utcnow()
             validate_quote(quote, proposal['option_symbol'], now)
         entry = Decimal(proposal['suggested_entry'])
+        reference = Decimal(proposal.get('reconfirm_price') or entry)
+        displayed = Decimal(str(displayed_price)) if displayed_price is not None else Decimal(proposal['suggested_entry'])
+        if not displayed.is_finite() or displayed != reference:
+            raise PriceChanged(proposal, reference)
+        if quote is not None:
+            current = quote.ask
+            if not rt.settings.selection.premium_min <= current <= rt.settings.selection.premium_max:
+                raise ValueError('السعر الحالي خارج نطاق الدخول المحدد؛ لم تُعتمد الصفقة.')
+            if current > Decimal(proposal['suggested_entry']) + rt.settings.approval.confirmation_tolerance_abs:
+                raise ValueError('السعر ارتفع أكثر من السماح المحدد ($0.30) عن سعرك الأصلي؛ أرسلي طلبًا جديدًا إذا رغبتِ.')
+            if current != reference:
+                updated = await rt.db.fetchrow(REFRESH_PRICE, proposal_id, current, proposal.get('reconfirm_price'))
+                if updated is None:
+                    raise ValueError('تغيّرت حالة الطلب؛ أعيدي فتح المعاينة قبل التأكيد.')
+                raise PriceChanged(updated, current)
+            entry = current
+        else:
+            entry = reference
+        if not rt.settings.selection.premium_min <= entry <= rt.settings.selection.premium_max:
+            raise ValueError('سعر الدخول خارج النطاق المحدد؛ لم تُعتمد الصفقة.')
         if quote is not None and quote.bid <= hard_stop_price(entry, rt.settings.tracking.stop_loss_pct):
             raise ValueError('السعر الحالي وصل إلى وقف الخسارة بالنسبة لدخولك؛ لم يبدأ تتبع جديد.')
         async with rt.db.pool.acquire() as conn:
@@ -191,6 +218,8 @@ class ManualTracking:
                 self._check_request(proposal, user_id, chat_id)
                 if proposal['status'] == 'APPROVED':
                     return await conn.fetchrow(q.TRADE_BY_PROPOSAL, proposal_id), False
+                if Decimal(proposal.get('reconfirm_price') or proposal['suggested_entry']) != reference:
+                    raise PriceChanged(proposal, Decimal(proposal.get('reconfirm_price') or proposal['suggested_entry']))
                 now = utcnow()
                 self._session(proposal, now)
                 if quote is not None:
@@ -208,7 +237,7 @@ class ManualTracking:
                 signal = await conn.fetchrow(q.GET_SIGNAL, proposal['signal_db_id'])
                 trade = await conn.fetchrow(q.INSERT_TRADE, proposal_id, signal['id'], signal['signal_id'],
                     proposal['option_symbol'], proposal['direction'], proposal['strike'], proposal['expiry'],
-                    entry, entry, quote.as_record() if quote is not None else {'awaiting_live_quote': True},
+                    Decimal(proposal['suggested_entry']), entry, quote.as_record() if quote is not None else {'awaiting_live_quote': True},
                     'MANUAL', None, now, now, quote.bid if quote else None,
                     quote.ask if quote else None, quote.last if quote else None)
                 if trade is None:
@@ -247,7 +276,10 @@ class ManualTracking:
             await query.answer('استخدمي المعاينة في خاص البوت.', show_alert=True)
             return
         try:
-            _, action, pid = query.data.split(':')
+            parts = query.data.split(':')
+            if len(parts) not in (3,4):raise ValueError('طلب غير صالح.')
+            _, action, pid = parts[:3]
+            displayed_price = parts[3] if len(parts)==4 else None
             pid = int(pid)
             if action not in ('start', 'cancel', 'public', 'private', 'both'):
                 raise ValueError('إجراء غير صالح.')
@@ -265,7 +297,7 @@ class ManualTracking:
             if action in ('public','private','both') and not routing.enabled():
                 raise ValueError('اختيار القنوات غير مفعّل.')
             chosen = routing.destination(action) if action in ('public','private','both') else None
-            trade, created = await self.confirm(pid, user_id, chat_id,chosen)
+            trade, created = await self.confirm(pid, user_id, chat_id,chosen,displayed_price)
             if trade is None:
                 raise RuntimeError('Approved manual request has no trade')
             # Durable registration precedes delivery. Leader tick retries failed
@@ -280,6 +312,14 @@ class ManualTracking:
                 f"{trade['option_symbol']}\nسعر الدخول: ${Decimal(trade['approved_entry']):.2f}\n"
                 f"قناة النشر: {routing.channel_name(trade.get('publication_chat_id'))}. "
                 'تابعي حالة التتبع عبر /qa_status.')
+        except PriceChanged as error:
+            await query.edit_message_text(
+                f"🦋 تحديث سعر العقد اليدوي\n{error.proposal['option_symbol']}\n"
+                f"السعر الأصلي: ${Decimal(error.proposal['suggested_entry']):.2f}\n"
+                f"سعر الدخول المعروض: ${error.price:.2f}\n\n"
+                "لم تُفتح صفقة بعد. اختاري القناة مجددًا لاعتماد السعر بعد فحصه؛ خارج الجلسة يُستخدم السعر المعروض.\n"
+                "صلاحية الطلب الأصلية لم تتغير.",
+                reply_markup=manual_keyboard(error.proposal['id'],error.price))
         except ValueError as error:
             await query.message.reply_text(str(error))
         except Exception:
