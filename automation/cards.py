@@ -211,6 +211,7 @@ class Publisher:
         level: int = 0,
         payload: Optional[dict] = None,
         max_attempts: int = 3,
+        caption: Optional[str] = None,
     ) -> Optional[int]:
         route = await trade_destination(self.db,entity_type,entity_id,event_type,self.chat_id)
         targets = (PUBLIC_CHAT,PRIVATE_CHAT) if route == BOTH_CHATS else (route,)
@@ -224,7 +225,7 @@ class Publisher:
             async def send():
                 card = await asyncio.to_thread(render)
                 try:
-                    return await self.bot.send_photo(chat_id=target,photo=card,**PHOTO_TIMEOUTS,**reply)
+                    return await self.bot.send_photo(chat_id=target,photo=card,**({"caption": caption} if caption else {}),**PHOTO_TIMEOUTS,**reply)
                 finally:
                     card.close()
             sent = await self._deliver(entity_type,entity_id,event,level,
