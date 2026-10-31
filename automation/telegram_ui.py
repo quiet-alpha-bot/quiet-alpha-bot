@@ -22,6 +22,7 @@ CB_CANCEL = "cn"
 CB_PUBLIC = "pub"
 CB_PRIVATE = "priv"
 CB_BOTH = "both"
+CB_REOPEN = "reopen"
 
 
 def callback_data(action: str, proposal_id: int) -> str:
@@ -34,7 +35,7 @@ def parse_callback(data: Optional[str]) -> Optional[tuple[str, int]]:
     parts = data.split(":")
     if len(parts) != 3 or parts[0] != CB_PREFIX or not parts[2].isdigit():
         return None
-    if parts[1] not in {CB_APPROVE, CB_REJECT, CB_RECONFIRM, CB_CANCEL, CB_PUBLIC, CB_PRIVATE, CB_BOTH}:
+    if parts[1] not in {CB_APPROVE, CB_REJECT, CB_RECONFIRM, CB_CANCEL, CB_PUBLIC, CB_PRIVATE, CB_BOTH, CB_REOPEN}:
         return None
     return parts[1], int(parts[2])
 
