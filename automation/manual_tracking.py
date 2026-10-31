@@ -21,7 +21,7 @@ USAGE = (
     'لإضافة عقد يدوي للتتبع:\n'
     '/qa_track SPXW 7770 PUT 3.10\n\n'
     'الترتيب: الرمز، الاسترايك، CALL أو PUT، سعر دخولك.\n'
-    'الانتهاء افتراضيًا اليوم بتوقيت نيويورك. ولتحديده:\n'
+    'الانتهاء افتراضيًا اليوم، وبعد الإغلاق أقرب يوم من الاثنين إلى الجمعة. راجعي عطلات السوق أو حدديه:\n'
     '/qa_track SPXW 7770 PUT 2026-10-26 3.10\n\n'
     'تظهر معاينة أولًا، ولا يبدأ النشر والتتبع إلا بعد التأكيد.'
 )
@@ -59,8 +59,8 @@ def parse_manual_args(args, today, root):
         raise ValueError(USAGE)
     if occ is None or occ.root != root or occ.strike <= 0:
         raise ValueError(f'هذا التتبع يدعم عقود {root} فقط. راجعي بيانات العقد.')
-    if occ.expiry != today:
-        raise ValueError('التتبع الحالي مخصص لعقود اليوم بتوقيت نيويورك.')
+    if occ.expiry < today:
+        raise ValueError('العقد منتهي؛ اختاري تاريخ انتهاء حاليًا أو لاحقًا.')
     if entry != entry.quantize(Decimal('.01')):
         raise ValueError('اكتبي سعر الدخول بمنزلتين عشريتين كحد أقصى.')
     return occ, entry
@@ -93,7 +93,12 @@ class ManualTracking:
             return
         try:
             now = utcnow()
-            occ, entry = parse_manual_args(context.args, et_date(now), self.rt.settings.uw.contract_root)
+            default_day = et_date(now)
+            if now >= et_datetime(default_day, self.rt.settings.market.close_et):
+                default_day += timedelta(days=1)
+            while default_day.weekday() >= 5:
+                default_day += timedelta(days=1)
+            occ, entry = parse_manual_args(context.args, default_day, self.rt.settings.uw.contract_root)
             self._available()
             db = self.rt.db
             async with db.pool.acquire() as conn:
@@ -136,6 +141,7 @@ class ManualTracking:
                 f'مستوى النجاح: <b>${entry + self.rt.settings.tracking.success_premium_gain:.2f}</b>\n\n'
                 'اختيار النشر يبدأ التتبع بسعر دخولك المكتوب.\n'
                 'الأرقام تُرصد من بدء المتابعة، ولا تشمل حركة العقد السابقة.\n'
+                'راجعي تاريخ الانتهاء أعلاه؛ خارج الجلسة يبدأ الرصد عند وصول سعر حي، دون احتساب أسعار سابقة.\n'
                 'المعاينة صالحة لمدة 5 دقائق.', parse_mode='HTML', reply_markup=keyboard)
         except ValueError as error:
             await update.message.reply_text(str(error))
@@ -150,11 +156,8 @@ class ManualTracking:
 
     def _session(self, proposal, now):
         s = self.rt.settings
-        if proposal['expiry'] != et_date(now):
-            raise ValueError('العقد ليس من عقود اليوم؛ أرسلي طلبًا جديدًا.')
-        if (not within_session(now, s.market.open_et, s.market.close_et)
-            or now >= et_datetime(proposal['expiry'], s.tracking.stop_time_et)):
-            raise ValueError('بدء التتبع اليدوي متاح أثناء جلسة السوق وقبل وقت إنهاء التتبع.')
+        if now >= et_datetime(proposal['expiry'], s.market.close_et):
+            raise ValueError('العقد منتهي. حددي تاريخ انتهاء قادم عبر /qa_track.')
 
     async def confirm(self, proposal_id, user_id, chat_id, publication_chat_id=None):
         """Atomically approve and register; no Telegram I/O inside the transaction."""
@@ -171,12 +174,15 @@ class ManualTracking:
         if proposal['status'] != 'PENDING_APPROVAL' or proposal['expires_at'] <= utcnow():
             raise ValueError('انتهت صلاحية الطلب أو تمت معالجته؛ أرسلي طلبًا جديدًا.')
         self._session(proposal, utcnow())
-        quotes, _ = await rt.uw.quotes_for([proposal['option_symbol']])
-        quote = quotes.get(proposal['option_symbol'])
+        quote = None
         now = utcnow()
-        validate_quote(quote, proposal['option_symbol'], now)
+        if within_session(now, rt.settings.market.open_et, rt.settings.market.close_et):
+            quotes, _ = await rt.uw.quotes_for([proposal['option_symbol']])
+            quote = quotes.get(proposal['option_symbol'])
+            now = utcnow()
+            validate_quote(quote, proposal['option_symbol'], now)
         entry = Decimal(proposal['suggested_entry'])
-        if quote.bid <= hard_stop_price(entry, rt.settings.tracking.stop_loss_pct):
+        if quote is not None and quote.bid <= hard_stop_price(entry, rt.settings.tracking.stop_loss_pct):
             raise ValueError('السعر الحالي وصل إلى وقف الخسارة بالنسبة لدخولك؛ لم يبدأ تتبع جديد.')
         async with rt.db.pool.acquire() as conn:
             async with conn.transaction():
@@ -187,7 +193,8 @@ class ManualTracking:
                     return await conn.fetchrow(q.TRADE_BY_PROPOSAL, proposal_id), False
                 now = utcnow()
                 self._session(proposal, now)
-                validate_quote(quote, proposal['option_symbol'], now)
+                if quote is not None:
+                    validate_quote(quote, proposal['option_symbol'], now)
                 if proposal['status'] != 'PENDING_APPROVAL' or proposal['expires_at'] <= now:
                     raise ValueError('انتهت صلاحية الطلب أو تمت معالجته؛ أرسلي طلبًا جديدًا.')
                 if await conn.fetchval(q.OPEN_DIRECTION_STRIKE_EXISTS, proposal['direction'], proposal['strike']):
@@ -201,21 +208,24 @@ class ManualTracking:
                 signal = await conn.fetchrow(q.GET_SIGNAL, proposal['signal_db_id'])
                 trade = await conn.fetchrow(q.INSERT_TRADE, proposal_id, signal['id'], signal['signal_id'],
                     proposal['option_symbol'], proposal['direction'], proposal['strike'], proposal['expiry'],
-                    entry, entry, quote.as_record(), 'MANUAL', None, now, now, quote.bid, quote.ask, quote.last)
+                    entry, entry, quote.as_record() if quote is not None else {'awaiting_live_quote': True},
+                    'MANUAL', None, now, now, quote.bid if quote else None,
+                    quote.ask if quote else None, quote.last if quote else None)
                 if trade is None:
                     raise RuntimeError('Manual approval has no trade')
-                # Preserve the first verified observation; no historical price backfill.
-                await conn.execute(q.UPDATE_TRADE_QUOTE, trade['id'], quote.bid, quote.ask, quote.last,
-                    quote.bid, now, quote.mid, quote.last, quote.bid, now, now, quote.last_tape_time)
-                tracking = rt.settings.tracking
-                if rt.settings.flags.milestones:
-                    reached = milestone_level(entry, quote.bid, tracking.milestone_step_pct)
-                    levels = new_milestones(0, reached, tracking.milestone_step_pct)
-                    if levels:
-                        await conn.execute(q.RECORD_MILESTONE_DETECTIONS, trade['id'], reached,
-                                           {str(level): str(quote.bid) for level in levels})
-                if rt.settings.flags.success_card and is_success(entry, quote.bid, tracking.success_premium_gain):
-                    await conn.fetchval(q.MARK_SUCCESS_DETECTED, trade['id'], now, quote.bid)
+                if quote is not None:
+                    # Preserve the first verified observation; no historical price backfill.
+                    await conn.execute(q.UPDATE_TRADE_QUOTE, trade['id'], quote.bid, quote.ask, quote.last,
+                        quote.bid, now, quote.mid, quote.last, quote.bid, now, now, quote.last_tape_time)
+                    tracking = rt.settings.tracking
+                    if rt.settings.flags.milestones:
+                        reached = milestone_level(entry, quote.bid, tracking.milestone_step_pct)
+                        levels = new_milestones(0, reached, tracking.milestone_step_pct)
+                        if levels:
+                            await conn.execute(q.RECORD_MILESTONE_DETECTIONS, trade['id'], reached,
+                                               {str(level): str(quote.bid) for level in levels})
+                    if rt.settings.flags.success_card and is_success(entry, quote.bid, tracking.success_premium_gain):
+                        await conn.fetchval(q.MARK_SUCCESS_DETECTED, trade['id'], now, quote.bid)
                 trade = await conn.fetchrow(q.GET_TRADE, trade['id'])
         return trade, True
 
