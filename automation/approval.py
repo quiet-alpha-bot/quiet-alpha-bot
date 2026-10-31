@@ -19,6 +19,7 @@ from telegram import Update
 from telegram.ext import ContextTypes
 
 from .session_finish import stopped
+from . import reconsideration
 from . import queries as q
 from . import channel_routing as routing
 from .entry import within_tolerance
@@ -28,7 +29,7 @@ from .telegram_ui import (
     CB_CANCEL,
     CB_PUBLIC, CB_PRIVATE, CB_BOTH, proposal_keyboard,
     CB_RECONFIRM,
-    CB_REJECT,
+    CB_REJECT, CB_REOPEN,
     contract_label,
     decision_footer,
     parse_callback,
@@ -36,7 +37,7 @@ from .telegram_ui import (
     reconfirm_text,
     usd,
 )
-from .timeutil import utcnow
+from .timeutil import utcnow, within_session
 from .uw_client import UWError
 
 if TYPE_CHECKING:
@@ -79,7 +80,14 @@ class ApprovalHandler:
 
         action, proposal_id = parsed
         try:
-            if action in (CB_PUBLIC, CB_PRIVATE, CB_BOTH):
+            if action == CB_REOPEN:
+                row = await reconsideration.restore(self.rt.db,proposal_id,user.id)
+                if row is None:
+                    await query.answer('انتهت مهلة إعادة النظر أو تمت معالجة الطلب.',show_alert=True)
+                    return
+                await query.answer('عاد المقترح للمراجعة؛ لم تُفتح صفقة.')
+                await query.edit_message_reply_markup(reply_markup=proposal_keyboard(proposal_id))
+            elif action in (CB_PUBLIC, CB_PRIVATE, CB_BOTH):
                 if not routing.enabled():
                     await query.answer('اختيار القنوات غير مفعّل.',show_alert=True)
                     return
@@ -109,10 +117,7 @@ class ApprovalHandler:
     # -----------------------------------------------------
     async def _decline(self, query, proposal_id, expected, new_status, user_id, footer) -> None:
         db = self.rt.db
-        row = await db.fetchrow(
-            q.DECIDE_PROPOSAL, proposal_id, expected.value, new_status.value, user_id,
-            new_status.value.lower(),
-        )
+        row = await reconsideration.reject(db,proposal_id,expected.value,user_id)
         if row is None:
             await self._answer_status(query, proposal_id)
             return
@@ -120,8 +125,11 @@ class ApprovalHandler:
         html = await _message_html(query)
         if html and query.message is not None:
             await self.rt.publisher.edit(
-                query.message.message_id, decision_footer(html, f"<b>{footer}</b>")
+                query.message.message_id, decision_footer(html, f"<b>{footer}</b>\nيمكنك إعادة النظر خلال ١٥ دقيقة من الرفض؛ لم تُفتح صفقة."),
+                reply_markup=reconsideration.keyboard(proposal_id)
             )
+        else:
+            await query.edit_message_reply_markup(reply_markup=reconsideration.keyboard(proposal_id))
         logger.info("Proposal #%s %s", proposal_id, new_status.value)
 
     async def _answer_status(self, query, proposal_id: int) -> None:
@@ -130,7 +138,7 @@ class ApprovalHandler:
         await query.answer(f"الحالة الحالية: {status}", show_alert=True)
         if (
             current is not None
-            and status in {"EXPIRED", "APPROVED", "REJECTED", "CANCELLED"}
+            and status in {"EXPIRED", "APPROVED", "CANCELLED"}
             and query.message is not None
         ):
             try:
@@ -148,6 +156,9 @@ class ApprovalHandler:
         existing = await rt.db.fetchrow(q.GET_PROPOSAL, proposal_id)
         if existing is None:
             await self._answer_status(query, proposal_id)
+            return
+        if (existing.get('details') or {}).get('reconsidered') and not within_session(utcnow(),s.market.open_et,s.market.close_et):
+            await query.answer('إعادة اعتماد الفرص التلقائية متاحة أثناء جلسة السوق فقط.',show_alert=True)
             return
         chosen = publication_chat_id or existing.get('publication_chat_id')
         if routing.enabled() and chosen is None:
@@ -191,6 +202,14 @@ class ApprovalHandler:
             )
             return
 
+        if (proposal.get('details') or {}).get('reconsidered'):
+            from .manual_tracking import validate_quote
+            try:
+                validate_quote(quote,symbol,utcnow())
+            except ValueError as error:
+                await rt.db.execute(q.REVERT_APPROVAL,proposal_id)
+                await rt.publisher.text(str(error))
+                return
         current = quote.ask  # buy-side price used for entry
         if not s.selection.premium_min <= current <= s.selection.premium_max:
             replacement_id = await rt.pipeline.propose_alternative(proposal)
@@ -203,7 +222,7 @@ class ApprovalHandler:
                 await rt.db.execute(q.REVERT_APPROVAL, proposal_id)
                 await rt.publisher.text("السعر خارج نطاق الطرح، ولم تتأكد شروط البحث عن بديل قوي. لم تُفتح صفقة؛ يبقى المقترح حتى انتهاء صلاحيته.")
             return
-        if s.flags.flow_selection or (proposal.get("details") or {}).get("requires_flow"):
+        if s.flags.flow_selection or (proposal.get("details") or {}).get("requires_flow") or (proposal.get("details") or {}).get("reconsidered"):
             from .models import Direction
             from .selection import select_with_flow
             signal = await rt.db.fetchrow(q.GET_SIGNAL, proposal["signal_db_id"])
@@ -237,6 +256,8 @@ class ApprovalHandler:
             if s.approval.proposal_expiry_seconds
             else None
         )
+        if (proposal.get('details') or {}).get('reconsidered') and proposal.get('expires_at') is not None:
+            expires_at = min(expires_at,proposal['expires_at']) if expires_at else proposal['expires_at']
         updated = await rt.db.fetchrow(
             q.SET_NEEDS_RECONFIRM, proposal_id, current, quote.as_record(), expires_at
         )
