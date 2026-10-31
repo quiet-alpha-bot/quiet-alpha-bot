@@ -4,6 +4,7 @@ import logging
 import os
 from datetime import time, timedelta
 
+from .session_finish import stopped
 from . import queries as q
 from . import channel_routing as routing
 from .opening_prayer import keyboard, destinations
@@ -50,6 +51,7 @@ class ClosingMessage:
     async def tick(self):
         if not enabled():return
         now=utcnow();day=et_date(now);rt=self.rt
+        if await stopped(rt.db,day):return
         await rt.db.execute(EXPIRE,now)
         if day.weekday()>=5 or now<et_datetime(day,rt.settings.market.close_et):return
         if rt.settings.owner_user_id is None or not routing.enabled():
@@ -71,6 +73,7 @@ class ClosingMessage:
             await self.publish(row)
 
     async def publish(self,row):
+        if await stopped(self.rt.db,row["market_date"]):return
         if not enabled() or row['status']!='APPROVED' or utcnow()>=row['expires_at']:return
         states=[]
         for event,chat in destinations(row):
