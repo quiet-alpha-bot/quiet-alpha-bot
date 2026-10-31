@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from datetime import datetime
 from decimal import Decimal
 from typing import Optional
@@ -401,15 +402,22 @@ class Tracker:
     async def run(self) -> None:
         logger.info("Tracker started")
         while True:
+            started = time.monotonic()
+            failed = False
             try:
                 await self.tick()
                 self.last_error = None
             except asyncio.CancelledError:
                 raise
             except Exception as error:
+                failed = True
                 self.last_error = type(error).__name__
                 logger.exception("Tracker tick failed")
-            await asyncio.sleep(self.s.tracking.poll_seconds)
+            self.last_cycle_seconds = max(0.0, time.monotonic() - started)
+            # Await the entire cycle: never overlap quote requests or deliveries.
+            interval = max(1.0, float(self.s.tracking.poll_seconds))
+            delay = interval if failed else max(0.1, interval - self.last_cycle_seconds)
+            await asyncio.sleep(delay)
 
     async def recover_stale_pending(self) -> list:
         """PENDING older than EVENT_PENDING_STALE_SECONDS -> NEEDS_RECONCILIATION.
