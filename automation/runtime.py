@@ -29,6 +29,7 @@ from . import queries as q
 from . import channel_routing as routing
 from .approval import ApprovalHandler
 from .radar_publication import RadarPublication
+from .session_finish import SessionFinish, stopped as session_stopped
 from .manual_tracking import ManualTracking
 from .manual_exit import ManualExit
 from .contract_support import ContractSupport
@@ -80,6 +81,7 @@ class AutomationRuntime:
         self.webhook: Optional[WebhookServer] = None
         self.approval = ApprovalHandler(self)
         self.radar_publication = RadarPublication(self)
+        self.session_finish = SessionFinish(self)
         self.manual = ManualTracking(self)
         self.manual_exit = ManualExit(self)
         self.opening_prayer = OpeningPrayer(self)
@@ -316,7 +318,6 @@ class AutomationRuntime:
             await self.tracker.send_public_exit(trade)
             if self.settings.flags.highest_card:
                 await self.tracker.send_highest_card(trade)
-        await self._send_daily_report_if_due()
         # Retry definite closing-card failures even after the trade leaves TRACKING.
         for trade in await db.fetch(routing.PENDING_CLOSE_PUBLICATIONS):
             reason = trade['close_reason']
@@ -330,9 +331,13 @@ class AutomationRuntime:
             if reason != 'BREAKEVEN_EXIT' and self.settings.flags.highest_card:
                 await self.tracker.send_highest_card(trade)
 
+        await self._send_daily_report_if_due()
+
     async def _send_daily_report_if_due(self) -> None:
         """Send one report after all of today's trades have closed."""
         assert self.db is not None and self.publisher is not None
+        if await self.session_finish.tick():
+            return
         now = utcnow()
         local = to_et(now)
         if local.weekday() >= 5:
@@ -401,6 +406,7 @@ class AutomationRuntime:
             f"Tracking trades: {len(trades)}",
             f"Last UW watch observation: {last_obs.isoformat() if last_obs else '—'}",
         ]
+        lines.append('Automatic entries: '+('paused for today' if await session_stopped(self.db) else 'enabled'))
         lines.append('Channels: '+('enabled · public/private/both selection' if routing.enabled() else 'admin only for new trades'))
         lines.append(f"Approval price tolerance: ${self.settings.approval.confirmation_tolerance_abs} · configured price range enforced")
         if self.uw is not None:
@@ -627,6 +633,8 @@ def setup_automation(application: Application, renderers: CardRenderers) -> Opti
     application.add_handler(CommandHandler("qa_track", runtime.manual.command))
     application.add_handler(CommandHandler("qa_exit", runtime.manual_exit.command))
     application.add_handler(CallbackQueryHandler(runtime.manual.callback, pattern=r"^qam:"))
+    application.add_handler(CommandHandler("finish", runtime.session_finish.command))
+    application.add_handler(CallbackQueryHandler(runtime.session_finish.callback, pattern=r"^qaf:"))
     application.add_handler(CommandHandler("qa_status", runtime.cmd_status))
     application.add_handler(CommandHandler("qa_channels", runtime.cmd_channels))
     application.add_handler(CommandHandler("qa_close", runtime.cmd_close))
