@@ -157,6 +157,8 @@ def daily_report_text(
                 f"| {_signed_usd(result)}</code>"
                 + (" — خروج على رأس المال" if flat else (" — إيقاف بقرار الإدارة؛ السعر المعروض سعر الإغلاق" if manual_loss else ""))
             )
+            if (trade.get("approval_quote") or {}).get("manual_exit_price"):
+                lines.append("سعر الإغلاق مُدخل يدويًا من الإدارة؛ احتُسب ضمن نتيجة الصفقة.")
             lines.append(trade_timing(trade))
         if len(trades) > 30:
             lines.append(f"… و{len(trades) - 30} صفقات أخرى")
