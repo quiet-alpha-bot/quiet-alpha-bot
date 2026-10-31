@@ -416,10 +416,16 @@ def load_settings() -> Settings:
         require_in_range=env_bool("APPROVAL_REQUIRE_IN_RANGE", True),
     )
 
+    # Fast mode caps legacy deployment settings without requiring variable edits.
+    tracking_poll = max(1, env_int("TRACKING_POLL_SECONDS", 1) or 1)
+    tracking_refresh = max(0, env_int("TRACKING_MESSAGE_REFRESH_SECONDS", 5) or 0)
+    if env_bool("TRACKING_FAST_MODE", True):
+        tracking_poll = min(tracking_poll, 1)
+        tracking_refresh = min(tracking_refresh, 5)  # zero still disables routine edits
     tracking = TrackingSettings(
         group_milestones=env_bool("MILESTONES_GROUPED", True),
-        poll_seconds=env_int("TRACKING_POLL_SECONDS", 1) or 1,
-        message_refresh_seconds=env_int("TRACKING_MESSAGE_REFRESH_SECONDS", 60) or 0,
+        poll_seconds=tracking_poll,
+        message_refresh_seconds=tracking_refresh,
         milestone_step_pct=env_int("MILESTONE_STEP_PCT", 10) or 10,
         success_premium_gain=env_decimal("SUCCESS_PREMIUM_GAIN", "0.50"),
         stop_loss_pct=env_decimal("STOP_LOSS_PCT", "0.50"),
