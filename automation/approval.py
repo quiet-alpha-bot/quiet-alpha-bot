@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Optional
 from telegram import Update
 from telegram.ext import ContextTypes
 
+from .session_finish import stopped
 from . import queries as q
 from . import channel_routing as routing
 from .entry import within_tolerance
@@ -141,6 +142,9 @@ class ApprovalHandler:
                        user_id: int, publication_chat_id=None) -> None:
         rt = self.rt
         s = rt.settings
+        if await stopped(rt.db):
+            await query.answer("تم الاكتفاء لليوم؛ الدخول الجديد متوقف.", show_alert=True)
+            return
         existing = await rt.db.fetchrow(q.GET_PROPOSAL, proposal_id)
         if existing is None:
             await self._answer_status(query, proposal_id)
@@ -269,10 +273,12 @@ class ApprovalHandler:
         trade = None
         limit_hit = False
         strike_busy = False
+        session_finished = False
         assert rt.db.pool is not None
         async with rt.db.pool.acquire() as conn:
             async with conn.transaction():
                 await conn.execute(q.LOCK_TRADE_DIRECTION, proposal["direction"])
+                session_finished = await stopped(conn)
                 active_count = await conn.fetchval(
                     q.COUNT_TRACKING_DIRECTION, proposal["direction"]
                 )
@@ -280,7 +286,9 @@ class ApprovalHandler:
                     q.OPEN_DIRECTION_STRIKE_EXISTS,
                     proposal["direction"], proposal["strike"],
                 )
-                if strike_busy:
+                if session_finished:
+                    await conn.execute(q.REVERT_APPROVAL, proposal["id"])
+                elif strike_busy:
                     # Revert while still holding the same direction lock.
                     await conn.execute(q.REVERT_APPROVAL, proposal["id"])
                 elif active_count >= 6:
@@ -311,6 +319,9 @@ class ApprovalHandler:
                             quote.ask,
                             quote.last,
                         )
+        if session_finished:
+            await rt.publisher.text("تم الاكتفاء لليوم؛ لم يُفتح عقد جديد.")
+            return
         if strike_busy:
             await rt.publisher.text(
                 f"⚠️ يوجد عقد {proposal['strike']} {proposal['direction']} مفتوح بالفعل.\n"
