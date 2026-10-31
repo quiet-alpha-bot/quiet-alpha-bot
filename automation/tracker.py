@@ -185,11 +185,12 @@ class Tracker:
         if trade['close_reason'] in {'OWNER_EXIT','OWNER_EXIT_EXCLUDED','OWNER_EXIT_FLAT'}:
             entry, bid = Decimal(trade['approved_entry']), Decimal(trade['current_bid'])
             result = (bid - entry) * 100
+            price_label = "سعر الإغلاق اليدوي" if (trade.get("approval_quote") or {}).get("manual_exit_price") else "سعر الإغلاق المرصود"
             signed = f"{'+' if result >= 0 else '−'}${abs(result):.2f}"
             return await self.publisher.text_once('trade',trade['id'],'TRADE_EXIT',
                 f"🦋 <b>QUIET ALPHA — إغلاق الصفقة</b>\n\n<b>{label_for(trade)}</b>\n"
                 f"رقم الصفقة: <b>#{trade['id']}</b>\nسعر الدخول: <b>${entry:.2f}</b>\n"
-                f"سعر الإغلاق المرصود: <b>${bid:.2f}</b>\nنتيجة العقد: <b>{signed}</b>\n\n"
+                f"{price_label}: <b>${bid:.2f}</b>\nنتيجة العقد: <b>{signed}</b>\n\n"
                 "تم إيقاف الصفقة بقرار الإدارة، ونترقّب فرصة جديدة عند اكتمال شروط الدخول.",
                 payload={'bid':str(bid),'reason':trade['close_reason']})
         reason = {'PROTECTED_STOP':'تفعيل حماية الصفقة', 'SESSION_END':'نهاية الجلسة',
@@ -258,6 +259,8 @@ class Tracker:
             "HIGHEST_CARD",
             lambda: self.renderers.highest_card(entry, Decimal(highest), trade["option_symbol"]),
             payload={"highest_bid": str(highest), "time": str(trade["highest_bid_time"])},
+            caption=("تنويه: يتضمن أعلى سعر في هذه البطاقة سعر الإغلاق الذي أدخلته الإدارة يدويًا."
+                     if (trade.get("approval_quote") or {}).get("manual_exit_price") else None),
         )
 
     async def send_stop_loss_card(self, trade) -> Optional[int]:
@@ -467,7 +470,7 @@ class Tracker:
                     await self.refresh_message(trade["id"])
             except Exception:
                 logger.exception("Tracker: flush for trade #%s failed", trade["id"])
-            stop_at = et_datetime(trade["expiry"], self.s.tracking.stop_time_et)
+            stop_at = et_datetime(trade["expiry"], self.s.market.close_et if trade["classification"] == "MANUAL" else self.s.tracking.stop_time_et)
             if now >= stop_at or et_date(now) > trade["expiry"]:
                 await self.close(trade["id"], "SESSION_END")
                 continue
@@ -506,6 +509,11 @@ class Tracker:
             await self.db.execute(q.SET_TRADE_ERROR, trade_id, "QUOTE_NOT_RETURNED", now)
             return
 
+        if (quote.last_tape_time is None
+            or not 0 <= (now - quote.last_tape_time).total_seconds() <= 120
+            or (trade.get('approval_time') is not None and quote.last_tape_time < trade['approval_time'])):
+            await self.db.execute(q.SET_TRADE_ERROR, trade_id, 'STALE_QUOTE', now)
+            return
         changed = (quote.bid != trade["current_bid"]) or (quote.ask != trade["current_ask"])
         state = TrackState(
             current_bid=trade["current_bid"],
