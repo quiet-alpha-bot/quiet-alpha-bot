@@ -9,6 +9,7 @@ from html import escape
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
 from . import queries as q
+from . import reconsideration
 from . import channel_routing as routing
 from .milestones import milestone_level, new_milestones, is_success
 from .occ import OccSymbol, parse_occ, strike_text
@@ -281,18 +282,29 @@ class ManualTracking:
             _, action, pid = parts[:3]
             displayed_price = parts[3] if len(parts)==4 else None
             pid = int(pid)
-            if action not in ('start', 'cancel', 'public', 'private', 'both'):
+            if action not in ('start', 'cancel', 'public', 'private', 'both', 'reopen'):
                 raise ValueError('إجراء غير صالح.')
             await query.answer('جارٍ التحقق…')
             user_id, chat_id = update.effective_user.id, query.message.chat.id
+            if action == 'reopen':
+                proposal = await self.rt.db.fetchrow(q.GET_PROPOSAL,pid)
+                self._check_request(proposal,user_id,chat_id)
+                row = await reconsideration.restore(self.rt.db,pid,user_id)
+                if row is None:raise ValueError('انتهت مهلة إعادة النظر أو تمت معالجة الطلب.')
+                price=Decimal(row.get('reconfirm_price') or row['suggested_entry'])
+                await query.edit_message_text(
+                    f"🦋 عاد العقد اليدوي للمراجعة\n{row['option_symbol']}\nسعر الدخول المعروض: ${price:.2f}\n"
+                    "اختاري قناة النشر؛ يُفحص السعر مجددًا قبل الاعتماد. مهلة الرفض الأصلية لم تتغير.",
+                    reply_markup=manual_keyboard(pid,price))
+                return
             if action == 'cancel':
                 proposal = await self.rt.db.fetchrow(q.GET_PROPOSAL, pid)
                 self._check_request(proposal, user_id, chat_id)
-                changed = await self.rt.db.fetchrow(q.DECIDE_PROPOSAL, pid,
-                    'PENDING_APPROVAL', 'CANCELLED', user_id, 'manual request cancelled')
+                changed = await reconsideration.reject(self.rt.db,pid,'PENDING_APPROVAL',user_id)
                 if changed is None:
                     raise ValueError('تمت معالجة الطلب بالفعل؛ الإلغاء هنا لا يغلق صفقة مفتوحة.')
-                await query.edit_message_text('أُلغي طلب العقد اليدوي. لم تُضف صفقة إلى الإحصائية.')
+                await query.edit_message_text('رُفض العقد اليدوي، ولم تُفتح صفقة. يمكنك إعادة النظر خلال ١٥ دقيقة من الآن.',
+                    reply_markup=reconsideration.keyboard(pid,manual=True))
                 return
             if action in ('public','private','both') and not routing.enabled():
                 raise ValueError('اختيار القنوات غير مفعّل.')
