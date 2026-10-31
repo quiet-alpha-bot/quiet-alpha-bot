@@ -21,6 +21,7 @@ from datetime import timedelta
 from decimal import Decimal, InvalidOperation
 from typing import Optional
 
+from .session_finish import stopped
 from . import queries as q
 from .cards import Publisher
 from .config import Settings, strategy_snapshot
@@ -242,6 +243,9 @@ class SignalPipeline:
 
     # -----------------------------------------------------
     async def _process(self, row) -> None:
+        if await stopped(self.db):
+            await self.db.execute(q.FINISH_SIGNAL, row["id"], SignalStatus.SKIPPED.value, "SESSION_FINISHED")
+            return
         direction = Direction(row["direction"])
         requires_flow = (row.get("source") == "autonomous" or self.s.flags.flow_selection
                          or bool(self._signal_payload(row).get("alternative_count")))
@@ -413,6 +417,9 @@ class SignalPipeline:
                 str(pre_proposal_high) if pre_proposal_high is not None else None
             ),
         }
+        if await stopped(self.db):
+            await self.db.execute(q.FINISH_SIGNAL, row["id"], SignalStatus.SKIPPED.value, "SESSION_FINISHED")
+            return
         proposal = await self.db.fetchrow(
             q.INSERT_PROPOSAL,
             row["id"],
@@ -469,6 +476,8 @@ class SignalPipeline:
         if channel:
             from .channel_routing import channel_name
             text += f"\nقناة النشر المحفوظة: <b>{channel_name(channel)}</b> — يلزم تأكيد البديل."
+        if await stopped(self.db):
+            return
         message_id = await self.publisher.text_once(
             "proposal",
             proposal["id"],
