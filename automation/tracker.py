@@ -385,7 +385,7 @@ class Tracker:
             else:
                 await self.publisher.photo_once(
                     "trade", trade_id, "SUCCESS_CARD",
-                    lambda: self.renderers.success_card(entry, Decimal(bid), trade["option_symbol"]),
+                    lambda: self.renderers.success_card(entry, event.threshold, trade["option_symbol"]),
                     payload={"observed_bid": str(bid), "threshold": str(event.threshold)},
                     max_attempts=ORDERED_EVENT_MAX_ATTEMPTS,
                 )
