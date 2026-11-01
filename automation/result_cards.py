@@ -80,7 +80,8 @@ def draw_field(draw, text, box, color, maximum=80):
 
 
 def render(kind, values, option_symbol='', date_text=None, contract_name=''):
-    with Image.open(BASE / f'qa_{kind}_v2.png') as template:
+    template_name = 'qa_success_v3.png' if kind == 'success' else f'qa_{kind}_v2.png'
+    with Image.open(BASE / template_name) as template:
         image = template.convert('RGB')
     draw = ImageDraw.Draw(image)
     sx, sy = image.width/1536, image.height/1024
@@ -112,8 +113,8 @@ def create_success_card(entry_price, exit_price, option_symbol='', date_text=Non
     entry, target = number(entry_price), number(exit_price)
     if entry <= 0 or target <= entry:
         raise ValueError('Success price must exceed positive entry')
-    return render('success', [(profit((target-entry)*100),GREEN),
-                              ('$'+amount(target),GOLD),('$'+amount(entry),GOLD)],
+    return render('success', [('$'+amount(entry),GOLD),
+                              ('$'+amount(target),GOLD),(profit((target-entry)*100),GREEN)],
                   option_symbol, date_text, contract_name)
 
 
