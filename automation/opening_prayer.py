@@ -1,4 +1,4 @@
-"""Prepare at 16:15 Riyadh; only an explicit owner approval publishes photos.
+"""Prepare 15 minutes before the New York opening; only an explicit owner approval publishes photos.
 
 Independent leader task: the radar never waits for approval or Telegram here.
 Existing event ledger prevents duplicate or uncertain-delivery retries.
@@ -7,7 +7,7 @@ import asyncio
 import hashlib
 import logging
 import os
-from datetime import datetime, time
+from datetime import timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -25,8 +25,8 @@ INSERT='''INSERT INTO opening_prayers(market_date,caption,asset_sha256,public_ch
 VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT(market_date) DO NOTHING'''
 GET_DAY='SELECT * FROM opening_prayers WHERE market_date=$1'
 GET='SELECT * FROM opening_prayers WHERE id=$1'
-DECIDE='''UPDATE opening_prayers SET status=$2,decided_by=$3,decided_at=now(),publication_choice=$5
-WHERE id=$1 AND status='PENDING' AND expires_at>$4 RETURNING *'''
+DECIDE='''UPDATE opening_prayers SET status=$2,decided_by=$3,decided_at=$4,publication_choice=$5
+WHERE id=$1 AND status='PENDING' RETURNING *'''
 EXPIRE="UPDATE opening_prayers SET status='EXPIRED' WHERE expires_at<=$1 AND status='PENDING'"
 
 
@@ -38,8 +38,8 @@ def window(now,market):
     day=et_date(now)
     if day.weekday()>=5:
         return None
-    due=datetime.combine(day,time(16,15),tzinfo=RIYADH)
     end=et_datetime(day,market.open_et)
+    due=end-timedelta(minutes=15)
     return (day,end) if due<=now<end else None
 
 
@@ -80,7 +80,6 @@ class OpeningPrayer:
         if not enabled():
             return
         now=utcnow();rt=self.rt
-        await rt.db.execute(EXPIRE,now)
         active=window(now,rt.settings.market)
         if active is None:
             return
@@ -98,8 +97,6 @@ class OpeningPrayer:
             await self.publish(row)
 
     async def photo(self,row,event,chat,preview=False):
-        if utcnow()>=row['expires_at']:
-            return
         content=ASSET.read_bytes()
         if hashlib.sha256(content).hexdigest()!=row['asset_sha256']:
             self.last_error='APPROVED_ASSET_CHANGED'
@@ -107,7 +104,7 @@ class OpeningPrayer:
         caption=row['caption']
         if preview:
             caption+=('\n\nمعاينة الإدارة — لن تُنشر دون موافقتك.'
-                      f"\nالموافقة متاحة حتى افتتاح السوق {display_time(row['expires_at'],'Asia/Riyadh')}.")
+                      '\nتبقى هذه المعاينة متاحة حتى تختاري النشر أو الرفض.')
         async def send():
             from io import BytesIO
             with BytesIO(content) as photo:
@@ -118,7 +115,7 @@ class OpeningPrayer:
             {'publication_chat_id':str(chat),'asset_sha256':row['asset_sha256']},send,max_attempts=3)
 
     async def publish(self,row):
-        if not enabled() or row['status']!='APPROVED' or utcnow()>=row['expires_at']:
+        if not enabled() or row['status']!='APPROVED':
             return
         for event,chat in destinations(row):
             await self.photo(row,event,chat)
@@ -154,7 +151,7 @@ class OpeningPrayer:
         except (ValueError,TypeError):
             await query.answer('طلب غير صالح.',show_alert=True);return
         row=await rt.db.fetchrow(GET,ident)
-        if row is None or utcnow()>=row['expires_at'] or row['market_date']!=et_date(utcnow()):
+        if row is None:
             await query.answer('انتهت مهلة بطاقة اليوم.',show_alert=True);return
         if row['status']!='PENDING':
             await query.answer('تم تسجيل القرار مسبقًا.',show_alert=True);return
