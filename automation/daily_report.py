@@ -139,7 +139,7 @@ def daily_report_text(
     ]
 
     if trades:
-        lines.extend(["", "<b>تفاصيل الصفقات</b>", "سعر الدخول → أعلى سعر مرصود", "🕒 الطرح بتوقيت السعودية · ⏱ المدة إلى أعلى سعر"])
+        lines.extend(["", "<b>تفاصيل الصفقات</b>", "سعر الدخول → أعلى سعر مرصود"])
         for index, (trade, result) in enumerate(
             zip(trades[:30], summary["results"][:30]), start=1
         ):
@@ -159,7 +159,6 @@ def daily_report_text(
             )
             if (trade.get("approval_quote") or {}).get("manual_exit_price"):
                 lines.append("سعر الإغلاق مُدخل يدويًا من الإدارة؛ احتُسب ضمن نتيجة الصفقة.")
-            lines.append(trade_timing(trade))
         if len(trades) > 30:
             lines.append(f"… و{len(trades) - 30} صفقات أخرى")
 
