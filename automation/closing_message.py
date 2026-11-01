@@ -18,8 +18,8 @@ INSERT='''INSERT INTO closing_messages(market_date,caption,public_chat_id,privat
 VALUES($1,$2,$3,$4,$5) ON CONFLICT(market_date) DO NOTHING'''
 GET_DAY='SELECT * FROM closing_messages WHERE market_date=$1'
 GET='SELECT * FROM closing_messages WHERE id=$1'
-DECIDE='''UPDATE closing_messages SET status=$2,decided_by=$3,decided_at=now(),publication_choice=$5
-WHERE id=$1 AND status='PENDING' AND expires_at>$4 RETURNING *'''
+DECIDE='''UPDATE closing_messages SET status=$2,decided_by=$3,decided_at=$4,publication_choice=$5
+WHERE id=$1 AND status='PENDING' RETURNING *'''
 EXPIRE="UPDATE closing_messages SET status='EXPIRED' WHERE expires_at<=$1 AND status='PENDING'"
 
 
@@ -52,7 +52,6 @@ class ClosingMessage:
         if not enabled():return
         now=utcnow();day=et_date(now);rt=self.rt
         if await stopped(rt.db,day):return
-        await rt.db.execute(EXPIRE,now)
         if day.weekday()>=5 or now<et_datetime(day,rt.settings.market.close_et):return
         if rt.settings.owner_user_id is None or not routing.enabled():
             self.last_error='OWNER_OR_CHANNEL_ROUTING_MISSING';return
@@ -67,19 +66,17 @@ class ClosingMessage:
             await rt.publisher.text_once('closing_message',row['id'],'PREVIEW',
                 row['caption']+'\n\nمعاينة الإدارة — اختاري مكان النشر أو تخطي اليوم.\n'
                 'كل قناة تستقبل الختام بعد وصول بيانها اليومي فقط.\n'
-                'إذا لم يصل بيان إحدى القنوات، ينتظر إرسال ختامها حتى نهاية اليوم بتوقيت نيويورك.',
+                'تبقى المعاينة متاحة حتى تختاري النشر أو الرفض، وكل وجهة تنتظر بيان يومها.',
                 reply_markup=keyboard(row['id'],'qac'))
         elif row['status']=='APPROVED':
             await self.publish(row)
 
     async def publish(self,row):
         if await stopped(self.rt.db,row["market_date"]):return
-        if not enabled() or row['status']!='APPROVED' or utcnow()>=row['expires_at']:return
+        if not enabled() or row['status']!='APPROVED':return
         states=[]
         for event,chat in destinations(row):
             if await self.report_sent(row['market_date'],chat):
-                # Recheck time after DB I/O; never send yesterday's closing today.
-                if utcnow()>=row['expires_at']:return
                 await self.rt.publisher.text_once('closing_message',row['id'],event,
                     row['caption'],chat_id=chat)
             state=await self.rt.db.fetchrow(q.EVENT_STATUS,'closing_message',row['id'],event,0)
@@ -114,7 +111,7 @@ class ClosingMessage:
         except (ValueError,TypeError):
             await query.answer('طلب غير صالح.',show_alert=True);return
         row=await rt.db.fetchrow(GET,ident)
-        if row is None or utcnow()>=row['expires_at'] or row['market_date']!=et_date(utcnow()):
+        if row is None:
             await query.answer('انتهت مهلة رسالة هذا اليوم.',show_alert=True);return
         row=await rt.db.fetchrow(DECIDE,ident,'SKIPPED' if action=='skip' else 'APPROVED',
                                 query.from_user.id,utcnow(),'both' if action=='skip' else action)
