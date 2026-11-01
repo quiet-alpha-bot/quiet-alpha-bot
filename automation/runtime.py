@@ -55,7 +55,7 @@ logger = logging.getLogger("quiet-alpha.runtime")
 
 LEADER_RETRY_SECONDS = 15
 MAINTENANCE_SECONDS = 30
-DAILY_REPORT_DELAY_MINUTES = 5
+DAILY_REPORT_DELAY_MINUTES = 2
 
 
 class AutomationRuntime:
@@ -434,8 +434,9 @@ class AutomationRuntime:
             lines.append("Contract support: enabled · once after success · checks every 60s")
             if self.contract_support.last_error:
                 lines.append(f"Contract support data: {self.contract_support.last_error}")
-        lines.append(f"Opening prayer: {'enabled' if prayer_enabled() else 'disabled'} · 16:15 Riyadh · owner approval required")
-        lines.append(f"Closing message: {'enabled' if closing_enabled() else 'disabled'} · after channel report · owner approval required")
+        lines.append(f"Opening prayer: {'enabled' if prayer_enabled() else 'disabled'} · 15m before NY open (16:15 summer / 17:15 winter Riyadh) · approval stays available")
+        lines.append('Daily report: market close + 2m · waits for closed trades')
+        lines.append(f"Closing message: {'enabled' if closing_enabled() else 'disabled'} · after channel report · approval stays available")
         if self.closing_message.last_error:
             lines.append(f"Closing message data: {self.closing_message.last_error}")
         if self.opening_prayer.last_error:
