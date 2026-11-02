@@ -65,6 +65,7 @@ WHERE id=$1 AND status='PENDING_APPROVAL' AND classification='MANUAL'"""
 PENDING_CLOSE_PUBLICATIONS = """
 SELECT t.* FROM trades t
 WHERE t.status='CLOSED' AND t.publication_chat_id IS NOT NULL
+AND COALESCE(t.approval_quote->>'trade_mode','')<>'HERO_OR_ZERO'
 AND EXISTS (SELECT 1 FROM events e WHERE e.entity_type='trade' AND e.entity_id=t.id
             AND e.event_type IN ('ENTRY_CARD','ENTRY_CARD_PRIVATE') AND e.status='SENT')
 AND EXISTS (
