@@ -9,6 +9,7 @@ from typing import Sequence
 from zoneinfo import ZoneInfo
 
 from .models import money
+from .hero import is_hero
 from .occ import strike_text
 
 
@@ -150,6 +151,7 @@ def daily_report_text(
             won = result >= success_dollars and not flat
             label = (
                 f"{strike_text(Decimal(trade['strike']))} {trade['direction']}"
+                + (' · HERO OR ZERO' if is_hero(trade) else '')
             )
             lines.append(
                 f"{index}. {'⚖️' if flat else ('✅' if won else '❌')} <code>{escape(label)} | "
