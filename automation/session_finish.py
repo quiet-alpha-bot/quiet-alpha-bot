@@ -5,6 +5,7 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from . import queries as q, channel_routing as routing
 from .timeutil import utcnow, et_date
 from .daily_report import daily_report_text
+from .hero import is_hero
 
 log = logging.getLogger('quiet-alpha.session-finish')
 GET = 'SELECT * FROM session_finishes WHERE market_date=$1'
@@ -81,7 +82,7 @@ class SessionFinish:
         for trade in trades:
             if trade['status']=='TRACKING':return False
             reason=trade.get('close_reason')
-            expected=[]
+            expected=['HIGHEST_CARD'] if is_hero(trade) else []
             if reason in ('OWNER_EXIT','OWNER_EXIT_EXCLUDED','OWNER_EXIT_FLAT'):expected.append('TRADE_EXIT')
             if reason=='BREAKEVEN_EXIT':expected.append('BREAKEVEN_EXIT')
             elif reason in ('STOP_LOSS_30','STOP_LOSS_50') and self.rt.settings.flags.stop_loss_card:
