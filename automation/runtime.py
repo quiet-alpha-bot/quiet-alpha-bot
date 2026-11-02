@@ -35,6 +35,7 @@ from .manual_exit import ManualExit
 from .contract_support import ContractSupport
 from .company_radar import CompanyRadar
 from .opening_prayer import OpeningPrayer, enabled as prayer_enabled
+from .weekly_messages import WeeklyMessages
 from .closing_message import ClosingMessage, enabled as closing_enabled
 from .autonomous import AutonomousOpportunities, SPXRadar, enabled as opportunity_enabled
 from .cards import CardRenderers, Publisher
@@ -86,6 +87,7 @@ class AutomationRuntime:
         self.manual_exit = ManualExit(self)
         self.opening_prayer = OpeningPrayer(self)
         self.closing_message = ClosingMessage(self)
+        self.weekly_messages = WeeklyMessages(self)
         self._tasks: set[asyncio.Task] = set()
         self._leader_children: list[asyncio.Task] = []
         self._leader_task: Optional[asyncio.Task] = None
@@ -246,6 +248,7 @@ class AutomationRuntime:
             self._leader_children = [
                 asyncio.create_task(self._maintenance_loop(), name="qa-maintenance")
             ]
+            self._leader_children.append(asyncio.create_task(self.weekly_messages.run(), name="qa-weekly-messages"))
             if closing_enabled():
                 self._leader_children.append(asyncio.create_task(self.closing_message.run(), name="qa-closing-message"))
             if prayer_enabled():
@@ -437,6 +440,9 @@ class AutomationRuntime:
         lines.append(f"Opening prayer: {'enabled' if prayer_enabled() else 'disabled'} · 15m before NY open (16:15 summer / 17:15 winter Riyadh) · approval stays available")
         lines.append('Daily report: market close + 2m · waits for closed trades')
         lines.append(f"Closing message: {'enabled' if closing_enabled() else 'disabled'} · after channel report · approval stays available")
+        lines.append("Weekly messages: Monday 12:00 Riyadh · welcome then instructions · owner approval stays available")
+        if self.weekly_messages.last_error:
+            lines.append(f"Weekly messages data: {self.weekly_messages.last_error}")
         if self.closing_message.last_error:
             lines.append(f"Closing message data: {self.closing_message.last_error}")
         if self.opening_prayer.last_error:
@@ -634,6 +640,7 @@ def setup_automation(application: Application, renderers: CardRenderers) -> Opti
     )
     application.add_handler(CallbackQueryHandler(runtime.radar_publication.callback, pattern=r"^qar:"))
     application.add_handler(CallbackQueryHandler(runtime.opening_prayer.callback, pattern=r"^qad:"))
+    application.add_handler(CallbackQueryHandler(runtime.weekly_messages.callback, pattern=r"^qaw:"))
     application.add_handler(CallbackQueryHandler(runtime.closing_message.callback, pattern=r"^qac:"))
     application.add_handler(CommandHandler("qa_track", runtime.manual.command))
     application.add_handler(CommandHandler("qa_exit", runtime.manual_exit.command))
