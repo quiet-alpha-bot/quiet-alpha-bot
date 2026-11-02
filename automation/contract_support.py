@@ -8,6 +8,7 @@ from decimal import Decimal
 from html import escape
 
 from . import queries as q
+from .hero import is_hero
 from .liquidity import eligible_flow
 from .pipeline import _payload_strength
 from .timeutil import utcnow, within_session, et_date
@@ -54,7 +55,7 @@ def support_text(trade, flow, strength):
         f'السيولة: صافي تدفقات شراء <b>${flow.net_buy:,.2f}</b> خلال آخر {FLOW_MINUTES} دقائق.\n'
         f'الزخم: المؤشر متوافق مع اتجاه العقد بقوة <b>{strength:.0f}%</b>.\n\n'
         'تدفقات الشراء متجددة على العقد نفسه، والزخم يدعم اتجاهه حاليًا. '
-        'تستمر المتابعة مع الوقف المعتمد.'
+        + ('تستمر المتابعة دون وقف خسارة — HERO OR ZERO.' if is_hero(trade) else 'تستمر المتابعة مع الوقف المعتمد.')
     )
 
 
