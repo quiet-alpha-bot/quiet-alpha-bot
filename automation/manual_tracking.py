@@ -10,6 +10,7 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
 from . import queries as q
 from . import reconsideration
+from .hero import MODE, LABEL, CAPTION, is_hero
 from . import channel_routing as routing
 from .milestones import milestone_level, new_milestones, is_success
 from .occ import OccSymbol, parse_occ, strike_text
@@ -100,7 +101,18 @@ class ManualTracking:
     def __init__(self, runtime):
         self.rt = runtime
 
-    async def command(self, update, context):
+    async def hero_command(self, update, context):
+        from types import SimpleNamespace
+        args = list(context.args or [])
+        if len(args) in (3,4) and args[1].upper() in ('CALL','PUT'):
+            args.insert(0, self.rt.settings.uw.contract_root)
+        if not args:
+            if await self.rt._guard(update):
+                await update.message.reply_text('الاستخدام: /H 7770 PUT 3.70\nأو: /H 7770 PUT 2026-11-06 3.70')
+            return
+        await self.command(update, SimpleNamespace(args=args), hero=True)
+
+    async def command(self, update, context, hero=False):
         if not await self.rt._guard(update):
             return
         if update.effective_chat is None or update.effective_chat.type != 'private':
@@ -129,7 +141,7 @@ class ManualTracking:
                         signal['id'], None, occ.right, occ.symbol, occ.strike, occ.expiry,
                         entry, None, None, None, 'MANUAL', None,
                         {'manual': True, 'owner_id': update.effective_user.id,
-                         'preview_chat_id': update.effective_chat.id}, now + timedelta(seconds=PREVIEW_SECONDS))
+                         'preview_chat_id': update.effective_chat.id, **({'trade_mode': MODE} if hero else {})}, now + timedelta(seconds=PREVIEW_SECONDS))
                     if proposal is None:
                         proposal = await conn.fetchrow(q.GET_PROPOSAL_BY_SIGNAL, signal['id'])
             if proposal['status'] != 'PENDING_APPROVAL' or proposal['expires_at'] <= utcnow():
@@ -142,7 +154,7 @@ class ManualTracking:
             # Do not store a private message id in proposals.message_id: existing
             # maintenance edits that field using the publishing channel's chat id.
             await update.message.reply_text(
-                '🦋 <b>QUIET ALPHA — عقد يدوي</b>\n\n'
+                ('🦋 <b>QUIET ALPHA — HERO OR ZERO</b>\n\n' if is_hero(proposal) else '🦋 <b>QUIET ALPHA — عقد يدوي</b>\n\n') +
                 f'<b>{escape(occ.root)} · {strike_text(occ.strike)} {occ.right}</b>\n'
                 f'الانتهاء: <b>{occ.expiry.isoformat()}</b>\n'
                 f'سعر دخولك: <b>${entry:.2f}</b>\n'
@@ -150,7 +162,7 @@ class ManualTracking:
                 'وقت الجلسة نراجع سعر الشراء الحالي قبل الاعتماد؛ إذا تغيّر نعرضه لتأكيدك.\n'
                 'الأرقام تُرصد من بدء المتابعة، ولا تشمل حركة العقد السابقة.\n'
                 'راجعي تاريخ الانتهاء أعلاه؛ خارج الجلسة يبدأ الرصد عند وصول سعر حي، دون احتساب أسعار سابقة.\n'
-                'المعاينة صالحة لمدة 5 دقائق.', parse_mode='HTML', reply_markup=keyboard)
+                'المعاينة صالحة لمدة 5 دقائق.' + ('\n\n'+CAPTION if is_hero(proposal) else ''), parse_mode='HTML', reply_markup=keyboard)
         except ValueError as error:
             await update.message.reply_text(str(error))
         except Exception:
@@ -210,7 +222,7 @@ class ManualTracking:
             entry = reference
         if not rt.settings.selection.premium_min <= entry <= rt.settings.selection.premium_max:
             raise ValueError('سعر الدخول خارج النطاق المحدد؛ لم تُعتمد الصفقة.')
-        if quote is not None and quote.bid <= hard_stop_price(entry, rt.settings.tracking.stop_loss_pct):
+        if not is_hero(proposal) and quote is not None and quote.bid <= hard_stop_price(entry, rt.settings.tracking.stop_loss_pct):
             raise ValueError('السعر الحالي وصل إلى وقف الخسارة بالنسبة لدخولك؛ لم يبدأ تتبع جديد.')
         async with rt.db.pool.acquire() as conn:
             async with conn.transaction():
@@ -238,7 +250,8 @@ class ManualTracking:
                 signal = await conn.fetchrow(q.GET_SIGNAL, proposal['signal_db_id'])
                 trade = await conn.fetchrow(q.INSERT_TRADE, proposal_id, signal['id'], signal['signal_id'],
                     proposal['option_symbol'], proposal['direction'], proposal['strike'], proposal['expiry'],
-                    Decimal(proposal['suggested_entry']), entry, quote.as_record() if quote is not None else {'awaiting_live_quote': True},
+                    Decimal(proposal['suggested_entry']), entry, {**(quote.as_record() if quote is not None else {'awaiting_live_quote': True}),
+                        **({'trade_mode': MODE} if is_hero(proposal) else {})},
                     'MANUAL', None, now, now, quote.bid if quote else None,
                     quote.ask if quote else None, quote.last if quote else None)
                 if trade is None:
@@ -293,7 +306,7 @@ class ManualTracking:
                 if row is None:raise ValueError('انتهت مهلة إعادة النظر أو تمت معالجة الطلب.')
                 price=Decimal(row.get('reconfirm_price') or row['suggested_entry'])
                 await query.edit_message_text(
-                    f"🦋 عاد العقد اليدوي للمراجعة\n{row['option_symbol']}\nسعر الدخول المعروض: ${price:.2f}\n"
+                    f"🦋 {'HERO OR ZERO' if is_hero(row) else 'العقد اليدوي'} — عاد للمراجعة\n{row['option_symbol']}\nسعر الدخول المعروض: ${price:.2f}\n"
                     "اختاري قناة النشر؛ يُفحص السعر مجددًا قبل الاعتماد. مهلة الرفض الأصلية لم تتغير.",
                     reply_markup=manual_keyboard(pid,price))
                 return
@@ -326,7 +339,7 @@ class ManualTracking:
                 'تابعي حالة التتبع عبر /qa_status.')
         except PriceChanged as error:
             await query.edit_message_text(
-                f"🦋 تحديث سعر العقد اليدوي\n{error.proposal['option_symbol']}\n"
+                f"🦋 تحديث سعر {'HERO OR ZERO' if is_hero(error.proposal) else 'العقد اليدوي'}\n{error.proposal['option_symbol']}\n"
                 f"السعر الأصلي: ${Decimal(error.proposal['suggested_entry']):.2f}\n"
                 f"سعر الدخول المعروض: ${error.price:.2f}\n\n"
                 "لم تُفتح صفقة بعد. اختاري القناة مجددًا لاعتماد السعر بعد فحصه؛ خارج الجلسة يُستخدم السعر المعروض.\n"
