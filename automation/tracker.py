@@ -28,6 +28,7 @@ from decimal import Decimal
 from typing import Optional
 
 from . import queries as q
+from .hero import is_hero, CAPTION as HERO_CAPTION, end_caption as hero_end_caption, end_card as hero_end_card, MANUAL_BLOCK
 from .cards import CardRenderers, Publisher
 from .config import Settings
 from .db import Database
@@ -79,7 +80,7 @@ def breakeven_approach_ready(entry, bid, lowest, highest, gain, drawdown) -> boo
 
 
 def label_for(trade) -> str:
-    return contract_label(Decimal(trade["strike"]), trade["direction"])
+    return contract_label(Decimal(trade["strike"]), trade["direction"]) + (" · HERO OR ZERO" if is_hero(trade) else "")
 
 
 class Tracker:
@@ -114,6 +115,7 @@ class Tracker:
                 Decimal(trade["strike"]),
                 Decimal(trade["approved_entry"]),
             ),
+            **({'caption': HERO_CAPTION} if is_hero(trade) else {}),
         )
         if trade.get("publication_chat_id"):
             return  # Routed trades publish updates only in their selected channel.
@@ -163,11 +165,17 @@ class Tracker:
             await self.db.execute(q.TOUCH_TRACKING_MESSAGE, trade_id)
 
     async def close(self, trade_id: int, reason: str) -> Optional[dict]:
+        current = await self.db.fetchrow(q.GET_TRADE, trade_id)
+        if is_hero(current) and reason != 'SESSION_END':
+            raise ValueError(MANUAL_BLOCK)
         closed = await self.db.fetchrow(q.CLOSE_TRADE, trade_id, reason)
         if closed is None:
             return None
         logger.info("Trade #%s closed (%s)", trade_id, reason)
         await self.refresh_message(trade_id, closed_reason=reason)
+        if is_hero(closed):
+            await self.send_highest_card(closed)
+            return closed
         if reason == "BREAKEVEN_EXIT":
             await self.send_breakeven_exit(closed)
             return closed
@@ -183,6 +191,7 @@ class Tracker:
         return closed
 
     async def send_public_exit(self, trade):
+        if is_hero(trade):return await self.send_highest_card(trade)
         if trade['close_reason'] in {'OWNER_EXIT','OWNER_EXIT_EXCLUDED','OWNER_EXIT_FLAT'}:
             entry, bid = Decimal(trade['approved_entry']), Decimal(trade['current_bid'])
             result = (bid - entry) * 100
@@ -248,6 +257,16 @@ class Tracker:
 
     async def send_highest_card(self, trade) -> Optional[int]:
         """Existing Highest Price card (same renderer as /max). Once per trade."""
+        if is_hero(trade):
+            if trade['status'] != 'CLOSED':return None
+            await self.flush_events(trade['id'])
+            refreshed = await self.db.fetchrow(q.GET_TRADE, trade['id'])
+            if refreshed:trade = refreshed
+            if trade['success_detected_at'] is not None and not trade['success_sent']:return None
+            return await self.publisher.photo_once('trade',trade['id'],'HIGHEST_CARD',
+                lambda: hero_end_card(trade),caption=hero_end_caption(trade),
+                payload={'highest_bid':str(trade['highest_bid']),'last_bid':str(trade['current_bid']),
+                         'trade_mode':'HERO_OR_ZERO'},max_attempts=ORDERED_EVENT_MAX_ATTEMPTS)
         if trade["success_detected_at"] is None:
             return None  # highest card is only for trades that achieved +$50
         entry = Decimal(trade["approved_entry"])
@@ -587,7 +606,7 @@ class Tracker:
         # Re-read after success detection because the `trade` argument is the
         # snapshot from before this quote was processed.
         latest_trade = await self.db.fetchrow(q.GET_TRADE, trade_id)
-        if quote.bid is not None and latest_trade is not None:
+        if quote.bid is not None and latest_trade is not None and not is_hero(latest_trade):
             success_achieved = latest_trade["success_detected_at"] is not None
             if (self.s.flags.breakeven_exit and not success_achieved
                 and quote.last_tape_time is not None
@@ -615,7 +634,7 @@ class Tracker:
 
         # A warning never closes the trade. The existing exit/stop paths above
         # take precedence, including a quote that jumps straight to entry.
-        if (latest_trade is not None and self.s.flags.breakeven_exit
+        if (latest_trade is not None and not is_hero(latest_trade) and self.s.flags.breakeven_exit
             and latest_trade["status"] == "TRACKING"
             and latest_trade["success_detected_at"] is None
             and quote.last_tape_time is not None
