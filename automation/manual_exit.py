@@ -3,6 +3,7 @@ import logging
 from decimal import Decimal, InvalidOperation
 from types import SimpleNamespace
 from . import queries as q
+from .hero import is_hero, MANUAL_BLOCK
 from .timeutil import utcnow, within_session
 
 logger = logging.getLogger('quiet-alpha.manual-exit')
@@ -29,6 +30,7 @@ class ManualExit:
         trade = await rt.db.fetchrow(q.GET_TRADE, trade_id)
         if trade is None:
             raise ValueError('لا توجد صفقة بهذا الرقم.')
+        if is_hero(trade):raise ValueError(MANUAL_BLOCK)
         if trade['status'] != 'TRACKING':
             raise ValueError('الصفقة مغلقة بالفعل؛ لم يتغير سعرها أو نتيجتها.')
         now = utcnow()
