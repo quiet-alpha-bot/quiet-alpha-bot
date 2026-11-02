@@ -35,6 +35,7 @@ from .manual_exit import ManualExit
 from .contract_support import ContractSupport
 from .company_radar import CompanyRadar
 from .opening_prayer import OpeningPrayer, enabled as prayer_enabled
+from .hero import is_hero
 from .weekly_messages import WeeklyMessages
 from .closing_message import ClosingMessage, enabled as closing_enabled
 from .autonomous import AutonomousOpportunities, SPXRadar, enabled as opportunity_enabled
@@ -321,6 +322,15 @@ class AutomationRuntime:
             await self.tracker.send_public_exit(trade)
             if self.settings.flags.highest_card:
                 await self.tracker.send_highest_card(trade)
+        for trade in await db.fetch("""SELECT t.* FROM trades t WHERE t.status='CLOSED'
+            AND t.approval_quote->>'trade_mode'='HERO_OR_ZERO'
+            AND (NOT EXISTS (SELECT 1 FROM events e WHERE e.entity_type='trade' AND e.entity_id=t.id
+                AND e.event_type='HIGHEST_CARD' AND e.status='SENT')
+            OR (t.publication_chat_id='both' AND NOT EXISTS (SELECT 1 FROM events e
+                WHERE e.entity_type='trade' AND e.entity_id=t.id
+                AND e.event_type='HIGHEST_CARD_PRIVATE' AND e.status='SENT')))
+            ORDER BY t.closed_at LIMIT 50"""):
+            await self.tracker.send_highest_card(trade)
         # Retry definite closing-card failures even after the trade leaves TRACKING.
         for trade in await db.fetch(routing.PENDING_CLOSE_PUBLICATIONS):
             reason = trade['close_reason']
@@ -440,6 +450,7 @@ class AutomationRuntime:
         lines.append(f"Opening prayer: {'enabled' if prayer_enabled() else 'disabled'} · 15m before NY open (16:15 summer / 17:15 winter Riyadh) · approval stays available")
         lines.append('Daily report: market close + 2m · waits for closed trades')
         lines.append(f"Closing message: {'enabled' if closing_enabled() else 'disabled'} · after channel report · approval stays available")
+        lines.append('Hero or Zero: /H · no stops · tracks until expiry session close')
         lines.append("Weekly messages: Monday 12:00 Riyadh · welcome then instructions · owner approval stays available")
         if self.weekly_messages.last_error:
             lines.append(f"Weekly messages data: {self.weekly_messages.last_error}")
@@ -477,7 +488,11 @@ class AutomationRuntime:
         if len(context.args) != 1 or not context.args[0].isdigit():
             await update.message.reply_text("الاستخدام: /qa_close <trade_id>")
             return
-        closed = await self.tracker.close(int(context.args[0]), "MANUAL_CLOSE")
+        try:
+            closed = await self.tracker.close(int(context.args[0]), "MANUAL_CLOSE")
+        except ValueError as error:
+            await update.message.reply_text(str(error))
+            return
         await update.message.reply_text(
             "✅ تم إغلاق المتابعة." if closed else "لا توجد صفقة TRACKING بهذا الرقم."
         )
@@ -642,6 +657,7 @@ def setup_automation(application: Application, renderers: CardRenderers) -> Opti
     application.add_handler(CallbackQueryHandler(runtime.opening_prayer.callback, pattern=r"^qad:"))
     application.add_handler(CallbackQueryHandler(runtime.weekly_messages.callback, pattern=r"^qaw:"))
     application.add_handler(CallbackQueryHandler(runtime.closing_message.callback, pattern=r"^qac:"))
+    application.add_handler(CommandHandler(["h", "H"], runtime.manual.hero_command))
     application.add_handler(CommandHandler("qa_track", runtime.manual.command))
     application.add_handler(CommandHandler("qa_exit", runtime.manual_exit.command))
     application.add_handler(CallbackQueryHandler(runtime.manual.callback, pattern=r"^qam:"))
