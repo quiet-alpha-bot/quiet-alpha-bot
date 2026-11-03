@@ -301,6 +301,7 @@ WHERE (t.approval_time AT TIME ZONE 'America/New_York')::date = $1
   AND p.status = 'APPROVED'
   AND t.status IN ('TRACKING', 'CLOSED')
   AND t.close_reason IS DISTINCT FROM 'OWNER_EXIT_EXCLUDED'
+  AND t.close_reason IS DISTINCT FROM 'OWNER_DELETED'
 ORDER BY t.approval_time, t.id
 """
 
