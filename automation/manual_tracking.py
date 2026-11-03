@@ -159,7 +159,7 @@ class ManualTracking:
                 f'الانتهاء: <b>{occ.expiry.isoformat()}</b>\n'
                 f'سعر دخولك: <b>${entry:.2f}</b>\n'
                 f'مستوى النجاح: <b>${entry + self.rt.settings.tracking.success_premium_gain:.2f}</b>\n\n'
-                'وقت الجلسة نراجع سعر الشراء الحالي قبل الاعتماد؛ إذا تغيّر نعرضه لتأكيدك.\n'
+                'عند الاعتماد نستخدم الأقل بين سعرك المكتوب وسعر الشراء الحالي؛ الارتفاع لا يرفع سعرك.\n'
                 'الأرقام تُرصد من بدء المتابعة، ولا تشمل حركة العقد السابقة.\n'
                 'راجعي تاريخ الانتهاء أعلاه؛ خارج الجلسة يبدأ الرصد عند وصول سعر حي، دون احتساب أسعار سابقة.\n'
                 'المعاينة صالحة لمدة 5 دقائق.' + ('\n\n'+CAPTION if is_hero(proposal) else ''), parse_mode='HTML', reply_markup=keyboard)
@@ -206,20 +206,9 @@ class ManualTracking:
         displayed = Decimal(str(displayed_price)) if displayed_price is not None else Decimal(proposal['suggested_entry'])
         if not displayed.is_finite() or displayed != reference:
             raise PriceChanged(proposal, reference)
-        if quote is not None:
-            current = quote.ask
-            if not rt.settings.selection.premium_min <= current <= rt.settings.selection.premium_max:
-                raise ValueError('السعر الحالي خارج نطاق الدخول المحدد؛ لم تُعتمد الصفقة.')
-            if current > Decimal(proposal['suggested_entry']) + rt.settings.approval.confirmation_tolerance_abs:
-                raise ValueError('السعر ارتفع أكثر من السماح المحدد ($0.30) عن سعرك الأصلي؛ أرسلي طلبًا جديدًا إذا رغبتِ.')
-            if current != reference:
-                updated = await rt.db.fetchrow(REFRESH_PRICE, proposal_id, current, proposal.get('reconfirm_price'))
-                if updated is None:
-                    raise ValueError('تغيّرت حالة الطلب؛ أعيدي فتح المعاينة قبل التأكيد.')
-                raise PriceChanged(updated, current)
-            entry = current
-        else:
-            entry = reference
+        # The owner authorizes the written basis; only a lower live ask improves it.
+        # Keep the actual quote alongside that basis for an honest audit trail.
+        entry = min(entry, quote.ask) if quote is not None else entry
         if not rt.settings.selection.premium_min <= entry <= rt.settings.selection.premium_max:
             raise ValueError('سعر الدخول خارج النطاق المحدد؛ لم تُعتمد الصفقة.')
         if not is_hero(proposal) and quote is not None and quote.bid <= hard_stop_price(entry, rt.settings.tracking.stop_loss_pct):
@@ -251,6 +240,8 @@ class ManualTracking:
                 trade = await conn.fetchrow(q.INSERT_TRADE, proposal_id, signal['id'], signal['signal_id'],
                     proposal['option_symbol'], proposal['direction'], proposal['strike'], proposal['expiry'],
                     Decimal(proposal['suggested_entry']), entry, {**(quote.as_record() if quote is not None else {'awaiting_live_quote': True}),
+                        'manual_requested_entry': str(proposal['suggested_entry']),
+                        'entry_basis': 'LIVE_ASK_LOWER' if quote is not None and quote.ask < Decimal(proposal['suggested_entry']) else 'OWNER_SPECIFIED',
                         **({'trade_mode': MODE} if is_hero(proposal) else {})},
                     'MANUAL', None, now, now, quote.bid if quote else None,
                     quote.ask if quote else None, quote.last if quote else None)
@@ -342,7 +333,7 @@ class ManualTracking:
                 f"🦋 تحديث سعر {'HERO OR ZERO' if is_hero(error.proposal) else 'العقد اليدوي'}\n{error.proposal['option_symbol']}\n"
                 f"السعر الأصلي: ${Decimal(error.proposal['suggested_entry']):.2f}\n"
                 f"سعر الدخول المعروض: ${error.price:.2f}\n\n"
-                "لم تُفتح صفقة بعد. اختاري القناة مجددًا لاعتماد السعر بعد فحصه؛ خارج الجلسة يُستخدم السعر المعروض.\n"
+                "لم تُفتح صفقة بعد. اختاري القناة مجددًا لاعتماد السعر بعد فحصه؛ يُستخدم سعرك الأصلي أو سعر الشراء الحالي إذا كان أقل.\n"
                 "صلاحية الطلب الأصلية لم تتغير.",
                 reply_markup=manual_keyboard(error.proposal['id'],error.price))
         except ValueError as error:
