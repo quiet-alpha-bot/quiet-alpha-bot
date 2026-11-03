@@ -39,6 +39,7 @@ from .db import Database
 from .models import money
 from .channel_routing import trade_destination, BOTH_CHATS, PUBLIC_CHAT, PRIVATE_CHAT, event_for_channel
 from . import queries as q
+from .delete_trade import delivery_guard, REASON as DELETED_REASON
 
 logger = logging.getLogger("quiet-alpha.cards")
 
@@ -140,7 +141,24 @@ class Publisher:
         send: Callable[[], Any],
         max_attempts: int = 3,
     ) -> Optional[int]:
-        event_id = await self.db.claim_event(
+        if entity_type == 'trade':
+            async with delivery_guard(self.db, entity_id) as conn:
+                trade = await conn.fetchrow(q.GET_TRADE, entity_id)
+                if trade and trade.get('close_reason') == DELETED_REASON:
+                    return None
+                ledger = self.db
+                if conn is not self.db:
+                    ledger = Database('')
+                    ledger.pool = conn  # Autocommit ledger writes on the locked connection.
+                return await self._deliver_unlocked(entity_type, entity_id, event_type,
+                                                    level, payload, send, max_attempts, ledger)
+        return await self._deliver_unlocked(entity_type, entity_id, event_type,
+                                            level, payload, send, max_attempts)
+
+    async def _deliver_unlocked(self, entity_type, entity_id, event_type, level,
+                                payload, send, max_attempts, ledger=None):
+        ledger = ledger if ledger is not None else self.db
+        event_id = await ledger.claim_event(
             entity_type, entity_id, event_type, level, payload, max_attempts
         )
         if event_id is None:
@@ -148,29 +166,29 @@ class Publisher:
         try:
             message = await send()
         except RetryAfter as error:
-            await self.db.mark_event(event_id, "FAILED", None, f"RetryAfter {error.retry_after}")
+            await ledger.mark_event(event_id, "FAILED", None, f"RetryAfter {error.retry_after}")
             logger.warning("%s/%s %s: rate limited by Telegram", entity_type, entity_id, event_type)
             return None
         except (BadRequest, Forbidden) as error:
-            await self.db.mark_event(event_id, "FAILED", None, type(error).__name__)
+            await ledger.mark_event(event_id, "FAILED", None, type(error).__name__)
             logger.error("%s/%s %s rejected by Telegram: %s",
                          entity_type, entity_id, event_type, error)
             return None
         except (TimedOut, NetworkError) as error:
-            await self.db.mark_event(event_id, "UNCERTAIN", None, type(error).__name__)
+            await ledger.mark_event(event_id, "UNCERTAIN", None, type(error).__name__)
             logger.error("%s/%s %s delivery uncertain (%s); will not resend",
                          entity_type, entity_id, event_type, type(error).__name__)
             await self.alert_uncertain(entity_type, entity_id, event_type, level)
             return None
         except Exception as error:  # rendering or unexpected errors
-            await self.db.mark_event(event_id, "FAILED", None, type(error).__name__)
+            await ledger.mark_event(event_id, "FAILED", None, type(error).__name__)
             logger.exception("%s/%s %s failed", entity_type, entity_id, event_type)
             return None
         message_id = getattr(message, "message_id", None)
         sent_at = getattr(message, "date", None)
         if not isinstance(sent_at, datetime) or sent_at.tzinfo is None:
             sent_at = None
-        await self.db.mark_event(event_id, "SENT", message_id, None, sent_at=sent_at)
+        await ledger.mark_event(event_id, "SENT", message_id, None, sent_at=sent_at)
         return message_id
 
     async def text_once(
