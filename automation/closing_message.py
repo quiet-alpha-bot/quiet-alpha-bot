@@ -4,7 +4,7 @@ import logging
 import os
 from datetime import time, timedelta
 
-from .session_finish import stopped
+from .session_finish import requested_channels
 from . import queries as q
 from . import channel_routing as routing
 from .opening_prayer import keyboard, destinations
@@ -51,7 +51,7 @@ class ClosingMessage:
     async def tick(self):
         if not enabled():return
         now=utcnow();day=et_date(now);rt=self.rt
-        if await stopped(rt.db,day):return
+        if len(await requested_channels(rt.db,day))==2:return
         if day.weekday()>=5 or now<et_datetime(day,rt.settings.market.close_et):return
         if rt.settings.owner_user_id is None or not routing.enabled():
             self.last_error='OWNER_OR_CHANNEL_ROUTING_MISSING';return
@@ -72,10 +72,11 @@ class ClosingMessage:
             await self.publish(row)
 
     async def publish(self,row):
-        if await stopped(self.rt.db,row["market_date"]):return
+        finished=await requested_channels(self.rt.db,row["market_date"])
         if not enabled() or row['status']!='APPROVED':return
         states=[]
         for event,chat in destinations(row):
+            if chat in finished:continue
             if await self.report_sent(row['market_date'],chat):
                 await self.rt.publisher.text_once('closing_message',row['id'],event,
                     row['caption'],chat_id=chat)
