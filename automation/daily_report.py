@@ -33,7 +33,7 @@ def _peak_result(trade) -> Decimal:
 
 
 def _included(trades):
-    return [t for t in trades if t.get("close_reason") != "OWNER_EXIT_EXCLUDED"]
+    return [t for t in trades if t.get("close_reason") not in {"OWNER_EXIT_EXCLUDED", "OWNER_DELETED"}]
 
 
 def _result(trade, success_dollars):
