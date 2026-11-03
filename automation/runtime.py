@@ -29,7 +29,8 @@ from . import queries as q
 from . import channel_routing as routing
 from .approval import ApprovalHandler
 from .radar_publication import RadarPublication
-from .session_finish import SessionFinish, stopped as session_stopped
+from .session_finish import SessionFinish, stopped as session_stopped, requested_channels
+from .delete_trade import command as delete_trade_command
 from .manual_tracking import ManualTracking
 from .manual_exit import ManualExit
 from .contract_support import ContractSupport
@@ -324,6 +325,7 @@ class AutomationRuntime:
                 await self.tracker.send_highest_card(trade)
         for trade in await db.fetch("""SELECT t.* FROM trades t WHERE t.status='CLOSED'
             AND t.approval_quote->>'trade_mode'='HERO_OR_ZERO'
+            AND t.close_reason IS DISTINCT FROM 'OWNER_DELETED'
             AND (NOT EXISTS (SELECT 1 FROM events e WHERE e.entity_type='trade' AND e.entity_id=t.id
                 AND e.event_type='HIGHEST_CARD' AND e.status='SENT')
             OR (t.publication_chat_id='both' AND NOT EXISTS (SELECT 1 FROM events e
@@ -349,8 +351,7 @@ class AutomationRuntime:
     async def _send_daily_report_if_due(self) -> None:
         """Send one report after all of today's trades have closed."""
         assert self.db is not None and self.publisher is not None
-        if await self.session_finish.tick():
-            return
+        await self.session_finish.tick()
         now = utcnow()
         local = to_et(now)
         if local.weekday() >= 5:
@@ -365,7 +366,9 @@ class AutomationRuntime:
         if not trades:
             return
         # Each channel closes its own report independently of other channels.
+        finished = await requested_channels(self.db, day)
         for chat_id, group in routing.report_groups(trades).items():
+            if chat_id in finished:continue
             if any(t['status'] == 'TRACKING' for t in group):
                 continue
             text, payload = daily_report_text(group,day,self.settings.tracking.success_premium_gain)
@@ -406,6 +409,9 @@ class AutomationRuntime:
             await update.message.reply_text("⚠️ الأتمتة غير جاهزة. راجعي السجل.")
             return False
         return True
+
+    async def cmd_delete(self, update, context):
+        await delete_trade_command(self, update, context)
 
     async def cmd_status(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not await self._guard(update):
@@ -661,6 +667,7 @@ def setup_automation(application: Application, renderers: CardRenderers) -> Opti
     application.add_handler(CommandHandler("qa_track", runtime.manual.command))
     application.add_handler(CommandHandler("qa_exit", runtime.manual_exit.command))
     application.add_handler(CallbackQueryHandler(runtime.manual.callback, pattern=r"^qam:"))
+    application.add_handler(CommandHandler(["d", "D"], runtime.cmd_delete))
     application.add_handler(CommandHandler("finish", runtime.session_finish.command))
     application.add_handler(CallbackQueryHandler(runtime.session_finish.callback, pattern=r"^qaf:"))
     application.add_handler(CommandHandler("qa_status", runtime.cmd_status))
