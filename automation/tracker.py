@@ -156,7 +156,7 @@ class Tracker:
     async def refresh_message(self, trade_id: int, closed_reason: Optional[str] = None,
                               stale_note: Optional[str] = None) -> None:
         trade = await self.db.fetchrow(q.GET_TRADE, trade_id)
-        if trade is None or trade.get("publication_chat_id") or trade["tracking_message_id"] is None:
+        if trade is None or trade.get("close_reason") == "OWNER_DELETED" or trade.get("publication_chat_id") or trade["tracking_message_id"] is None:
             return
         ok = await self.publisher.edit(
             trade["tracking_message_id"], self.render(trade, closed_reason, stale_note)
@@ -527,6 +527,9 @@ class Tracker:
 
     async def _process(self, trade, quote, latency: Optional[int]) -> None:
         trade_id = trade["id"]
+        latest = await self.db.fetchrow(q.GET_TRADE, trade_id)
+        if latest and latest.get('close_reason') == 'OWNER_DELETED':
+            return
         now = utcnow()
         if quote is None:
             await self.db.execute(
