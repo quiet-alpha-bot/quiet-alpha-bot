@@ -322,12 +322,28 @@ class Tracker:
                            trade_id, event_type, level)
         return False
 
+    async def _milestone_can_advance(self, trade_id: int, level: int) -> bool:
+        """Advance past ambiguous notices without claiming they were delivered.
+
+        The ledger remains UNCERTAIN, so the publisher
+        never resends that notice. Missing, failed and in-flight copies still
+        wait for their own delivery. Success cards retain strict SENT checks.
+        """
+        trade = await self.db.fetchrow(q.GET_TRADE, trade_id)
+        events = ('MILESTONE', 'MILESTONE_PRIVATE') if trade and trade.get('publication_chat_id') == 'both' else ('MILESTONE',)
+        for event in events:
+            row = await self.db.fetchrow(q.EVENT_STATUS, 'trade', trade_id, event, level)
+            if not row or row['status'] not in ('SENT', 'UNCERTAIN'):
+                return False
+        return True
+
     async def flush_events(self, trade_id: int) -> bool:
         """Publish detected-but-unsent events in threshold order.
 
         Each event has its own ledger key: (trade, MILESTONE, n) and
         (trade, SUCCESS_CARD). If one cannot be delivered yet, later events
-        wait, so the order is preserved after retries and restarts.
+        wait, except ambiguous milestone notices: those are skipped without
+        resending or marking SENT, allowing newer updates to continue.
         """
         trade = await self.db.fetchrow(q.GET_TRADE, trade_id)
         if trade is None:
@@ -397,7 +413,7 @@ class Tracker:
                     },
                     max_attempts=ORDERED_EVENT_MAX_ATTEMPTS,
                 )
-                if not await self._event_done(trade_id, "MILESTONE", event.level):
+                if not await self._milestone_can_advance(trade_id, event.level):
                     break
                 await self.db.execute(q.SET_TRADE_MILESTONE, trade_id, event.level)
                 index += len(run)
