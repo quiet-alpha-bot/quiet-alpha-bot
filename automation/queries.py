@@ -463,6 +463,7 @@ PENDING_ORDERED_MILESTONE = """
 SELECT level FROM events
 WHERE entity_type = 'trade' AND entity_id = $1 AND event_type IN ('MILESTONE','MILESTONE_PRIVATE')
   AND status <> 'SENT'
+  AND level > COALESCE((SELECT highest_milestone_sent FROM trades WHERE id=$1),0)
 ORDER BY level LIMIT 1
 """
 
