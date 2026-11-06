@@ -44,6 +44,9 @@ from .cards import CardRenderers, Publisher
 from .config import Settings, load_settings
 from .db import Database, LeaderLock
 from .daily_report import daily_report_text
+from .report_sections import admin_report, pages, send_pages
+from .weekly_report import WeeklyReport, enabled as weekly_report_enabled
+from .private_continuation import PrivateContinuation
 from .pipeline import SignalPipeline
 from .liquidity import LiquidityService
 from .radar import LiquidityRadar, radar_text
@@ -90,6 +93,8 @@ class AutomationRuntime:
         self.opening_prayer = OpeningPrayer(self)
         self.closing_message = ClosingMessage(self)
         self.weekly_messages = WeeklyMessages(self)
+        self.weekly_report = WeeklyReport(self)
+        self.private_continuation = PrivateContinuation(self)
         self._tasks: set[asyncio.Task] = set()
         self._leader_children: list[asyncio.Task] = []
         self._leader_task: Optional[asyncio.Task] = None
@@ -251,6 +256,9 @@ class AutomationRuntime:
                 asyncio.create_task(self._maintenance_loop(), name="qa-maintenance")
             ]
             self._leader_children.append(asyncio.create_task(self.weekly_messages.run(), name="qa-weekly-messages"))
+            self._leader_children.append(asyncio.create_task(self.weekly_report.run(), name="qa-weekly-report"))
+            if self.uw is not None:
+                self._leader_children.append(asyncio.create_task(self.private_continuation.run(), name="qa-private-continuation"))
             if closing_enabled():
                 self._leader_children.append(asyncio.create_task(self.closing_message.run(), name="qa-closing-message"))
             if prayer_enabled():
@@ -363,11 +371,14 @@ class AutomationRuntime:
         if now < report_at:
             return
         trades = await self.db.fetch(q.DAILY_TRADES, day)
-        if not trades:
+        if not trades and not (day.weekday()==4 and weekly_report_enabled() and routing.enabled()):
             return
         # Each channel closes its own report independently of other channels.
         finished = await requested_channels(self.db, day)
-        for chat_id, group in routing.report_groups(trades).items():
+        groups = routing.report_groups(trades)
+        if day.weekday()==4 and weekly_report_enabled() and routing.enabled():
+            groups.setdefault(routing.PRIVATE_CHAT, [])
+        for chat_id, group in groups.items():
             if chat_id in finished:continue
             if any(t['status'] == 'TRACKING' for t in group):
                 continue
@@ -376,16 +387,9 @@ class AutomationRuntime:
                 'DAILY_REPORT_'+str(chat_id),text,payload=payload,chat_id=chat_id)
         if any(trade['status'] == 'TRACKING' for trade in trades):
             return
-        text, payload = daily_report_text(
-            trades, day, self.settings.tracking.success_premium_gain
-        )
-        await self.publisher.text_once(
-            "daily",
-            int(day.strftime("%Y%m%d")),
-            "DAILY_REPORT",
-            text,
-            payload=payload,
-        )
+        text = admin_report(trades, day, self.settings.tracking.success_premium_gain)
+        await send_pages(self, "daily", int(day.strftime("%Y%m%d")),
+                         "DAILY_REPORT", text)
 
     # -----------------------------------------------------
     # Owner-only automation commands
@@ -455,6 +459,8 @@ class AutomationRuntime:
                 lines.append(f"Contract support data: {self.contract_support.last_error}")
         lines.append(f"Opening prayer: {'enabled' if prayer_enabled() else 'disabled'} · 15m before NY open (16:15 summer / 17:15 winter Riyadh) · approval stays available")
         lines.append('Daily report: market close + 2m · waits for closed trades')
+        lines.append("Private continuation: +50% · momentum + flow · private only · one child")
+        lines.append("Weekly report: Friday · private only · after daily report and closing greeting")
         lines.append(f"Closing message: {'enabled' if closing_enabled() else 'disabled'} · after channel report · approval stays available")
         lines.append('Hero or Zero: /H · no stops · tracks until expiry session close')
         lines.append("Weekly messages: Monday 12:00 Riyadh · welcome then instructions · owner approval stays available")
@@ -538,10 +544,9 @@ class AutomationRuntime:
         if not trades:
             await update.message.reply_text(f"لا توجد صفقات مسجلة بتاريخ {day.isoformat()} حسب توقيت سوق نيويورك.")
             return
-        text, _ = daily_report_text(
-            trades, day, self.settings.tracking.success_premium_gain, preview=True
-        )
-        await update.message.reply_html(text)
+        text = admin_report(trades, day, self.settings.tracking.success_premium_gain, preview=True)
+        for part in pages(text):
+            await update.message.reply_html(part)
 
     async def cmd_liquidity_check(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not await self._guard(update):
