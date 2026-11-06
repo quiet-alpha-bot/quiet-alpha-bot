@@ -66,7 +66,7 @@ GET_SIGNAL = "SELECT * FROM signals WHERE id = $1"
 SIGNALS_BEFORE_WATCH = """
 SELECT id, direction, signal_time FROM signals
 WHERE signal_time >= $1 AND signal_time < $2
-  AND source NOT IN ('manual','autonomous','alternative')
+  AND source NOT IN ('manual','autonomous','alternative','private_continuation')
 ORDER BY signal_time
 """
 
@@ -438,7 +438,7 @@ ORDER BY t.closed_at LIMIT 50
 """
 LATEST_DIRECTION_SIGNAL = """
 SELECT * FROM signals WHERE signal_time >= $1 AND signal_time <= $2
-AND ticker IS NOT DISTINCT FROM $3 AND source NOT IN ('manual','autonomous','alternative')
+AND ticker IS NOT DISTINCT FROM $3 AND source NOT IN ('manual','autonomous','alternative','private_continuation')
 ORDER BY signal_time DESC, id DESC LIMIT 1
 """
 
