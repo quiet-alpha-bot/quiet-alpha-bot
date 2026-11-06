@@ -130,8 +130,8 @@ def create_highest_price_card(entry_price, highest_price, option_symbol='', date
 
 def create_stop_loss_card(entry_price, exit_price=None, option_symbol='', date_text=None, contract_name=''):
     entry = number(entry_price)
-    # The legacy manual /stop command represents the configured 50% stop.
-    exit_value = entry*Decimal('.5') if exit_price is None else number(exit_price)
+    # The legacy manual /stop command represents the 35% loss (65% of entry remains).
+    exit_value = entry*Decimal('.65') if exit_price is None else number(exit_price)
     if entry <= 0 or exit_value < 0 or exit_value > entry:
         raise ValueError('Invalid stop price')
     return render('stop', [('$'+amount(entry),WHITE),('$'+amount(exit_value),WHITE),
