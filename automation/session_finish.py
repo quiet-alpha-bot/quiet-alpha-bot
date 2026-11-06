@@ -1,159 +1,174 @@
-"""Independent channel finishes; entries and tracking remain enabled."""
-import logging
-from datetime import date
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup
-from . import queries as q, channel_routing as routing
-from .timeutil import utcnow, et_date
-from .daily_report import daily_report_text
+"""Daily report: peak Bid gains and losses at tracked closing Bid."""
+
+from __future__ import annotations
+
+from datetime import date, datetime
+from decimal import Decimal
+from html import escape
+from typing import Sequence
+from zoneinfo import ZoneInfo
+
+from .models import money
 from .hero import is_hero
+from .occ import strike_text
 
-log = logging.getLogger('quiet-alpha.session-finish')
-GET = 'SELECT * FROM session_finishes WHERE market_date=$1'
-EXISTS = 'SELECT EXISTS(SELECT 1 FROM session_finishes WHERE market_date=$1)'
-INSERT = '''INSERT INTO session_finishes(market_date,publication_choice,requested_by)
-VALUES($1,$2,$3) ON CONFLICT(market_date) DO UPDATE
-SET publication_choice=CASE
- WHEN session_finishes.publication_choice=EXCLUDED.publication_choice
- THEN session_finishes.publication_choice ELSE 'both' END'''
-CAPTION = ('<b>نكتفي بهذا القدر اليوم 🦋</b>\n'
-           'الحمد لله دائماً وأبداً، وشكراً لثقتكم ووجودكم معنا 🤍\n'
-           'دمتم بخير وفي أمان الله 🕊️')
 
-async def stopped(db, day=None):
-    # Kept for existing entry callers: a report request never pauses entries.
-    return False
+ARABIC_MONTHS = (
+    "", "يناير", "فبراير", "مارس", "أبريل", "مايو", "يونيو",
+    "يوليو", "أغسطس", "سبتمبر", "أكتوبر", "نوفمبر", "ديسمبر",
+)
 
-async def require_open(db):
-    return
 
-async def requested_channels(db, day):
-    row = await db.fetchrow(GET, day)
-    if not row:return set()
-    target=routing.destination(row['publication_choice'])
-    return {routing.PUBLIC_CHAT,routing.PRIVATE_CHAT} if target=='both' else {target}
+def _signed_usd(value: Decimal) -> str:
+    sign = "+" if value >= 0 else "-"
+    return f"{sign}${money(abs(value))}"
 
-class SessionFinish:
-    def __init__(self, runtime):
-        self.rt = runtime
 
-    async def command(self, update, context):
-        if not await self.rt._guard(update):return
-        if not routing.enabled():
-            await update.message.reply_text('اختيار القنوات غير مفعّل.');return
-        day=et_date(utcnow())
-        markup=InlineKeyboardMarkup([[
-            InlineKeyboardButton(label,callback_data=f'qaf:{day.isoformat()}:{choice}')
-            for label,choice in [('🌐 العامة','public'),('🔒 الخاصة','private'),('📣 الاثنتان','both'),('إلغاء','cancel')]
-        ]])
-        await update.message.reply_text('اختاري القناة لإنهاء يومها بعد إغلاق صفقاتها وبطاقاتها.\n'
-            'تستمر الفرص بالوصول للإدارة؛ كل قناة تنتظر صفقاتها فقط ثم تستقبل رسالة الاكتفاء والبيان.',reply_markup=markup)
+def _peak_result(trade) -> Decimal:
+    entry = Decimal(trade["approved_entry"])
+    highest = trade["highest_bid"]
+    if highest is None:
+        return Decimal("0")
+    return (Decimal(highest) - entry) * Decimal("100")
 
-    async def callback(self,update,context):
-        query=update.callback_query
-        if query is None:return
-        rt=self.rt
-        if query.from_user is None or query.from_user.id!=rt.settings.owner_user_id:
-            await query.answer('⛔ غير مصرح',show_alert=True);return
-        if not rt.ready or query.message is None:
-            await query.answer('البوت غير جاهز.',show_alert=True);return
-        if str(query.message.chat.id) not in (str(rt.settings.owner_user_id),str(rt.settings.signal_chat_id)):
-            await query.answer('استخدمي خاص البوت أو الإدارة.',show_alert=True);return
-        try:
-            prefix,day,choice=query.data.split(':');day=date.fromisoformat(day)
-            if prefix!='qaf' or day!=et_date(utcnow()):raise ValueError('هذا الاختيار ليس لجلسة اليوم.')
-            if choice=='cancel':
-                await query.answer('أُلغي الطلب.');await query.edit_message_reply_markup(reply_markup=None);return
-            target=routing.destination(choice)
-            if not routing.enabled():raise ValueError('اختيار القنوات غير مفعّل.')
-            await routing.check_permission(rt.app.bot,target,rt.settings.signal_chat_id)
-            async with rt.db.pool.acquire() as conn:
-                async with conn.transaction():
-                    # Same locks as both automatic and manual entry commits.
-                    for direction in ('CALL','PUT'):
-                        await conn.execute(q.LOCK_TRADE_DIRECTION,direction)
-                    if day!=et_date(utcnow()):raise ValueError('انتهت الجلسة؛ أرسلي الأمر من جديد.')
-                    await conn.execute(INSERT,day,choice,query.from_user.id)
-            await query.answer('تم الاكتفاء لليوم.')
-            await query.edit_message_reply_markup(reply_markup=None)
-            await query.message.reply_text('✅ سُجل طلب الإنهاء للقناة المختارة. ننتظر إغلاق صفقاتها وبطاقاتها، ثم نرسل رسالة الاكتفاء والبيان. '
-                'تستمر الفرص بالوصول لك، والقناة الأخرى مستقلة.')
-            await self.tick()
-        except ValueError as error:
-            await query.message.reply_text(str(error))
-        except Exception:
-            log.exception('Session finish failed')
-            await query.message.reply_text('تعذر إكمال الطلب؛ راجعي /qa_status قبل المحاولة مجددًا.')
 
-    async def cards_sent(self,trades,chat=None):
-        for trade in trades:
-            if trade.get('close_reason')=='OWNER_DELETED':continue
-            if trade['status']=='TRACKING':return False
-            reason=trade.get('close_reason')
-            expected=['HIGHEST_CARD'] if is_hero(trade) else []
-            if reason in ('OWNER_EXIT','OWNER_EXIT_EXCLUDED','OWNER_EXIT_FLAT'):expected.append('TRADE_EXIT')
-            if reason=='BREAKEVEN_EXIT':expected.append('BREAKEVEN_EXIT')
-            elif reason in ('STOP_LOSS_30','STOP_LOSS_50') and self.rt.settings.flags.stop_loss_card:
-                expected.append('STOP_LOSS_CARD')
-            if (reason!='BREAKEVEN_EXIT' and trade.get('success_detected_at') is not None
-                    and self.rt.settings.flags.highest_card):expected.append('HIGHEST_CARD')
-            suffixes=('', '_PRIVATE') if trade.get('publication_chat_id')=='both' else ('',)
-            if chat is not None and trade.get('publication_chat_id')=='both':
-                suffixes=('_PRIVATE',) if chat==routing.PRIVATE_CHAT else ('',)
-            for suffix in suffixes:
-                entry=await self.rt.db.fetchrow(q.EVENT_STATUS,'trade',trade['id'],'ENTRY_CARD'+suffix,0)
-                if not entry or entry['status']!='SENT':continue
-                for kind in expected:
-                    event=await self.rt.db.fetchrow(q.EVENT_STATUS,'trade',trade['id'],kind+suffix,0)
-                    if not event or event['status']!='SENT':return False
-        return True
+def _included(trades):
+    return [t for t in trades if t.get("close_reason") not in {"OWNER_EXIT_EXCLUDED", "OWNER_DELETED"}]
 
-    async def tick(self):
-        async with self.rt.db.pool.acquire() as conn:
-            async with conn.transaction():
-                for direction in ('CALL','PUT'):
-                    await conn.execute(q.LOCK_TRADE_DIRECTION,direction)
-                return await self._tick_locked()
 
-    async def _tick_locked(self):
-        rt=self.rt;day=et_date(utcnow())
-        row=await rt.db.fetchrow(GET,day)
-        if not row:return False
-        trades=await rt.db.fetch(q.DAILY_TRADES.replace("  AND t.close_reason IS DISTINCT FROM 'OWNER_EXIT_EXCLUDED'", ""),day)
-        trades=[t for t in trades if t.get('close_reason')!='OWNER_DELETED']
-        groups=routing.report_groups(trades)
-        # Include any older still-tracked contract actually published in this channel.
-        tracking=await rt.db.fetch(q.TRACKING_TRADES)
-        target=routing.destination(row['publication_choice'])
-        targets=(routing.PUBLIC_CHAT,routing.PRIVATE_CHAT) if target=='both' else (target,)
-        ident=int(day.strftime('%Y%m%d'))
-        for chat in targets:
-            if et_date(utcnow())!=day:return True
-            group=groups.get(chat,[])
-            if any(t['status']=='TRACKING' for t in group):continue
-            pending=False
-            for trade in tracking:
-                route=trade.get('publication_chat_id')
-                if route not in (chat,'both'):continue
-                suffix='_PRIVATE' if route=='both' and chat==routing.PRIVATE_CHAT else ''
-                entry=await rt.db.fetchrow(q.EVENT_STATUS,'trade',trade['id'],'ENTRY_CARD'+suffix,0)
-                if entry and entry['status']=='SENT':pending=True;break
-            if pending:continue
-            # Keep the original route so private copies use their own card ledger.
-            ids={t['id'] for t in group}
-            if not await self.cards_sent([t for t in trades if t['id'] in ids],chat):continue
-            revision=max(ids,default=0)
-            greeting='FINISH_GREETING_'+str(chat)
-            text,payload=daily_report_text(group,day,rt.settings.tracking.success_premium_gain)
-            text += "\n\nيشمل صفقات اليوم حتى الآن؛ يُحدّث بعد إغلاق أي عقد جديد."
-            # Friday's private experiment keeps daily -> closing -> weekly,
-            # including a manually finished session.
-            report='DAILY_REPORT_'+str(chat)
-            sequence=[(greeting,CAPTION,None),(report,text,payload)]
-            if day.weekday()==4 and chat==routing.PRIVATE_CHAT:
-                sequence.reverse()
-            for event,body,details in sequence:
-                await rt.publisher.text_once('daily',ident,event,body,
-                    payload=details,chat_id=chat,level=revision)
-                state=await rt.db.fetchrow(q.EVENT_STATUS,'daily',ident,event,revision)
-                if not state or state['status']!='SENT':break
-        return True
+def _result(trade, success_dollars):
+    peak = _peak_result(trade)
+    reason = trade.get("close_reason")
+    if reason in {"BREAKEVEN_EXIT", "OWNER_EXIT_FLAT"} or (reason == "OWNER_EXIT" and peak < success_dollars):
+        if trade["current_bid"] is not None:
+            return (Decimal(trade["current_bid"]) - Decimal(trade["approved_entry"])) * 100
+    return peak
+
+
+def summarize_daily_trades(trades: Sequence, success_dollars: Decimal) -> dict:
+    trades = _included(trades)
+    neutral = [t["close_reason"] in {"BREAKEVEN_EXIT", "OWNER_EXIT_FLAT"} for t in trades]
+    results = [_result(t, success_dollars) for t in trades]
+    wins = sum(result >= success_dollars and not flat for result, flat in zip(results, neutral))
+    losses = len(results) - wins - sum(neutral)
+    positive = sum((max(result, Decimal("0")) for result in results), Decimal("0"))
+    # current_bid is frozen when status becomes CLOSED: quote updates only
+    # apply to TRACKING rows. This is an observed price, not a broker fill.
+    closed_results = [
+        (Decimal(t["current_bid"]) - Decimal(t["approved_entry"])) * Decimal("100")
+        for t in trades
+        if t["status"] == "CLOSED" and t["current_bid"] is not None
+    ]
+    missing_close_prices = sum(
+        t["status"] == "CLOSED" and t["current_bid"] is None for t in trades
+    )
+    negative = sum((min(result, Decimal("0")) for result in closed_results), Decimal("0"))
+    total = positive + negative
+    win_rate = (
+        Decimal(wins) * Decimal("100") / Decimal(len(results))
+        if results else Decimal("0")
+    )
+    best_index = max(range(len(results)), key=results.__getitem__) if results else None
+    return {
+        "total": len(results),
+        "missing_close_prices": missing_close_prices,
+        "wins": wins,
+        "breakeven": sum(neutral),
+        "losses": losses,
+        "win_rate": win_rate,
+        "positive": positive,
+        "negative": negative,
+        "net": total,
+        "best_index": best_index,
+        "results": results,
+        "stop_loss": sum(t["close_reason"] in {"STOP_LOSS_30", "STOP_LOSS_35", "STOP_LOSS_50"} for t in trades),
+        "protected": sum(t["close_reason"] == "PROTECTED_STOP" for t in trades),
+        "session_end": sum(t["close_reason"] == "SESSION_END" for t in trades),
+    }
+
+
+def trade_timing(trade) -> str:
+    """Telegram publication to first occurrence of the tracked peak; no backfill."""
+    published = trade.get("published_at")
+    peak = trade.get("highest_bid_time")
+    time_text = duration = "—"
+    if isinstance(published, datetime) and published.tzinfo is not None:
+        local = published.astimezone(ZoneInfo("Asia/Riyadh"))
+        time_text = f"{local.hour % 12 or 12}:{local.minute:02d} {'ص' if local.hour < 12 else 'م'}"
+        if isinstance(peak, datetime) and peak.tzinfo is not None:
+            elapsed = (peak - published).total_seconds()
+            if elapsed >= 0:
+                hours, rest = divmod(int(elapsed), 3600)
+                minutes, seconds = divmod(rest, 60)
+                parts = []
+                if hours:
+                    parts.append(f"{hours}س")
+                if minutes:
+                    parts.append(f"{minutes}د")
+                if seconds or not parts:
+                    parts.append(f"{seconds}ث")
+                duration = " ".join(parts)
+    return f"🕒 {time_text} | ⏱ {duration}"
+
+
+def daily_report_text(
+    trades: Sequence,
+    day: date,
+    success_premium_gain: Decimal,
+    preview: bool = False,
+    detail_limit: int | None = 30,
+) -> tuple[str, dict]:
+    trades = _included(trades)
+    success_dollars = success_premium_gain * Decimal("100")
+    summary = summarize_daily_trades(trades, success_dollars)
+    title = "📊 <b>QUIET ALPHA — البيان اليومي</b>"
+    if preview:
+        title += " <i>(معاينة)</i>"
+    lines = [
+        title,
+        f"{day.day} {ARABIC_MONTHS[day.month]} {day.year}",
+        "",
+        f"إجمالي الصفقات: <b>{summary['total']}</b>",
+        f"✅ رابحة: <b>{summary['wins']}</b>",
+        f"❌ خاسرة: <b>{summary['losses']}</b>",
+        f"⚖️ خروج على رأس المال: <b>{summary['breakeven']}</b>",
+        f"نسبة النجاح: <b>{summary['win_rate'].quantize(Decimal('0.1'))}%</b>",
+        "",
+        f"📈 مجموع إجمالي الربح: ${money(summary['positive'])}",
+        f"📉 مجموع إجمالي الخسارة: {'-' if summary['negative'] < 0 else ''}${money(abs(summary['negative']))}",
+        f"💰 صافي الربح: <b>{'-' if summary['net'] < 0 else ''}${money(abs(summary['net']))}</b>"
+        f" ≈ <b>{'-' if summary['net'] < 0 else ''}{money(abs(summary['net']) * Decimal('3.75'))} ر.س</b>",
+    ]
+
+    if trades:
+        lines.extend(["", "<b>تفاصيل الصفقات</b>", "سعر الدخول → أعلى سعر مرصود"])
+        for index, (trade, result) in enumerate(
+            zip(trades[:detail_limit], summary["results"][:detail_limit]), start=1
+        ):
+            entry = Decimal(trade["approved_entry"])
+            highest = trade["highest_bid"]
+            flat = trade["close_reason"] in {"BREAKEVEN_EXIT", "OWNER_EXIT_FLAT"}
+            manual_loss = trade["close_reason"] == "OWNER_EXIT" and _peak_result(trade) < success_dollars
+            won = result >= success_dollars and not flat
+            label = (
+                f"{strike_text(Decimal(trade['strike']))} {trade['direction']}"
+                + (' · HERO OR ZERO' if is_hero(trade) else '')
+            )
+            lines.append(
+                f"{index}. {'⚖️' if flat else ('✅' if won else '❌')} <code>{escape(label)} | "
+                f"{money(entry)} → {money(trade['current_bid']) if flat or manual_loss else (money(highest) if highest is not None else '—')} "
+                f"| {_signed_usd(result)}</code>"
+                + (" — خروج على رأس المال" if flat else (" — إيقاف بقرار الإدارة؛ السعر المعروض سعر الإغلاق" if manual_loss else ""))
+            )
+            if (trade.get("approval_quote") or {}).get("manual_exit_price"):
+                lines.append("سعر الإغلاق مُدخل يدويًا من الإدارة؛ احتُسب ضمن نتيجة الصفقة.")
+        if detail_limit is not None and len(trades) > detail_limit:
+            lines.append(f"… و{len(trades) - detail_limit} صفقات أخرى")
+
+    if summary["missing_close_prices"]:
+        lines.append(f"⚠️ {summary['missing_close_prices']} صفقة مغلقة بلا سعر إغلاق؛ خسائرها غير مكتملة.")
+    payload = {key: str(value) for key, value in summary.items() if key != "results"}
+    return "\n".join(lines), payload
+
+
+__all__ = ["daily_report_text", "summarize_daily_trades"]
