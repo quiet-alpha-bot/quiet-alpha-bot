@@ -1,691 +1,488 @@
-"""Wires the automation layer into the existing python-telegram-bot app.
+"""Configuration for the Quiet Alpha automation layer.
 
-Called from main.py only when AUTOMATION_ENABLED=true:
+Three kinds of settings live here:
 
-    setup_automation(application, renderers)
+1. Secrets and IDs (environment only, never logged):
+   BOT_TOKEN, SIGNAL_CHAT_ID, OWNER_USER_ID, UW_API_KEY,
+   TV_WEBHOOK_SECRET, DATABASE_URL.
 
-Guarantees:
-* Never raises into main.py; any failure leaves the manual bot running.
-* Telegram polling stays exactly as it is (run_polling in main.py).
-* The webhook server, UW watch engine and tracker live in the same process,
-  started from post_init and stopped from post_shutdown.
-* Watch engine, tracker and sweeps run only on the instance holding the
-  PostgreSQL advisory lock (no duplicates during Railway redeploys).
+2. Feature flags. Every flag defaults to false. Building a component does
+   not enable it.
+
+3. Strategy settings. Values that have NOT been decided yet are marked
+   "DEVELOPMENT / SHADOW DEFAULT". They exist only so the code can run;
+   they are NOT final trading rules. Every one of them can be overridden
+   with an environment variable of the same name, without code changes.
 """
 
 from __future__ import annotations
 
-import asyncio
-import logging
-from dataclasses import replace
-from datetime import date, timedelta
-from decimal import Decimal
+import os
+from dataclasses import dataclass, field
+from datetime import time
+from decimal import Decimal, InvalidOperation
 from typing import Optional
 
-from telegram import Update
-from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes
 
-from . import queries as q
-from . import channel_routing as routing
-from .approval import ApprovalHandler
-from .radar_publication import RadarPublication
-from .session_finish import SessionFinish, stopped as session_stopped, requested_channels
-from .delete_trade import command as delete_trade_command
-from .manual_tracking import ManualTracking
-from .manual_exit import ManualExit
-from .contract_support import ContractSupport
-from .company_radar import CompanyRadar
-from .opening_prayer import OpeningPrayer, enabled as prayer_enabled
-from .hero import is_hero
-from .weekly_messages import WeeklyMessages
-from .closing_message import ClosingMessage, enabled as closing_enabled
-from .autonomous import AutonomousOpportunities, SPXRadar, enabled as opportunity_enabled
-from .cards import CardRenderers, Publisher
-from .config import Settings, load_settings
-from .db import Database, LeaderLock
-from .daily_report import daily_report_text
-from .report_sections import admin_report, pages, send_pages
-from .weekly_report import WeeklyReport, enabled as weekly_report_enabled
-from .private_continuation import PrivateContinuation
-from .pipeline import SignalPipeline
-from .liquidity import LiquidityService
-from .radar import LiquidityRadar, radar_text
-from .telegram_ui import decision_footer, usd
-from .timeutil import et_date, et_datetime, to_et, utcnow
-from .tracker import Tracker
-from .uw_client import UWClient
-from .watch_engine import WatchEngine
-from .webhook import WebhookServer
+# =========================================================
+# Environment helpers
+# =========================================================
 
-logger = logging.getLogger("quiet-alpha.runtime")
-
-LEADER_RETRY_SECONDS = 15
-MAINTENANCE_SECONDS = 30
-DAILY_REPORT_DELAY_MINUTES = 2
+_TRUE = {"1", "true", "yes", "on"}
+_FALSE = {"0", "false", "no", "off", ""}
 
 
-class AutomationRuntime:
-    def __init__(self, application: Application, settings: Settings,
-                 renderers: CardRenderers) -> None:
-        self.app = application
-        self.settings = settings
-        self.renderers = renderers
-        self.ready = False
-        self.is_leader = False
-        self.db: Optional[Database] = None
-        self.uw: Optional[UWClient] = None
-        self.publisher: Optional[Publisher] = None
-        self.pipeline: Optional[SignalPipeline] = None
-        self.tracker: Optional[Tracker] = None
-        self.watch: Optional[WatchEngine] = None
-        self.liquidity = None
-        self.radar = None
-        self.contract_support = None
-        self.company_radar = None
-        self.spx_radar = None
-        self.opportunities = None
-        self.webhook: Optional[WebhookServer] = None
-        self.approval = ApprovalHandler(self)
-        self.radar_publication = RadarPublication(self)
-        self.session_finish = SessionFinish(self)
-        self.manual = ManualTracking(self)
-        self.manual_exit = ManualExit(self)
-        self.opening_prayer = OpeningPrayer(self)
-        self.closing_message = ClosingMessage(self)
-        self.weekly_messages = WeeklyMessages(self)
-        self.weekly_report = WeeklyReport(self)
-        self.private_continuation = PrivateContinuation(self)
-        self._tasks: set[asyncio.Task] = set()
-        self._leader_children: list[asyncio.Task] = []
-        self._leader_task: Optional[asyncio.Task] = None
-        self._lock: Optional[LeaderLock] = None
-        self.disabled: list[str] = []
-
-    # -----------------------------------------------------
-    # Startup / shutdown (never raise)
-    # -----------------------------------------------------
-    async def start(self, _app: Application) -> None:
-        try:
-            await self._start()
-        except Exception:
-            logger.exception("Automation failed to start — manual bot continues")
-            self.ready = False
-
-    async def _start(self) -> None:
-        s = self.settings
-        problems = s.problems()
-        for problem in problems:
-            logger.warning("Automation config: %s", problem)
-
-        if not (s.bot_token and s.signal_chat_id and s.database_url):
-            logger.error("Automation disabled: core configuration missing")
-            return
-
-        self.db = Database(s.database_url)
-        await self.db.connect()
-        await self.db.migrate()
-
-        self.publisher = Publisher(self.app.bot, s.signal_chat_id, self.db)
-
-        # Effective flags: a component whose requirements are missing is
-        # switched off (fail closed) instead of half-running.
-        off: dict[str, bool] = {}
-        if not s.uw_api_key:
-            for name in ("uw_watch", "selection", "tracking", "liquidity_radar", "flow_selection"):
-                if getattr(s.flags, name):
-                    off[name] = False
-                    self.disabled.append(f"{name}: UW_API_KEY missing")
-        if s.flags.proposals and s.owner_user_id is None:
-            off["proposals"] = False
-            self.disabled.append("proposals: OWNER_USER_ID missing/invalid")
-        if s.flags.tv_intake and not s.tv_webhook_secret:
-            off["tv_intake"] = False
-            self.disabled.append("tv_intake: TV_WEBHOOK_SECRET missing")
-        if off:
-            s = replace(s, flags=replace(s.flags, **off))
-            self.settings = s
-
-        if s.uw_api_key:
-            self.uw = UWClient(s.uw_api_key, s.uw)
-            await self.uw.start()
-
-        if self.uw is not None:
-            self.liquidity = LiquidityService(self.uw, s.selection.flow_max_pages)
-            self.radar = LiquidityRadar(s, self.db, self.publisher, self.liquidity)
-            self.contract_support = ContractSupport(s, self.db, self.publisher, self.liquidity)
-            self.company_radar = CompanyRadar(s, self.db, self.publisher, self.uw)
-        self.pipeline = SignalPipeline(s, self.db, self.uw, self.publisher, self.liquidity)
-        if self.uw is not None:
-            self.spx_radar = SPXRadar(s, self.db, self.publisher, self.uw)
-            self.opportunities = AutonomousOpportunities(s, self.db, self.uw, self.liquidity,
-                                                         self.pipeline, self._schedule_signal)
-            self.pipeline.autonomous = self.opportunities
-        self.tracker = Tracker(s, self.db, self.uw, self.publisher, self.renderers)
-        if self.uw is not None:
-            self.watch = WatchEngine(s, self.db, self.uw, self.publisher)
-
-        self.webhook = WebhookServer(
-            db=self.db,
-            secret=s.tv_webhook_secret,
-            path=s.webhook_path,
-            port=s.port,
-            max_body_bytes=s.webhook_max_body_bytes,
-            intake_enabled=s.flags.tv_intake,
-            on_new_signal=self._schedule_signal,
-            health=self.health,
-        )
-        await self.webhook.start()
-
-        self.ready = True
-        self._leader_task = asyncio.create_task(self._leader_loop(), name="qa-leader")
-        logger.info("Automation started: %s", self.flag_summary())
-        await self.publisher.text(
-            "🟢 <b>QUIET ALPHA Automation</b> بدأ\n"
-            f"<code>{self.flag_summary()}</code>"
-            + ("\n⚠️ " + "\n⚠️ ".join(self.disabled) if self.disabled else "")
-        )
-
-    async def stop(self, _app: Application) -> None:
-        try:
-            for task in list(self._leader_children) + list(self._tasks):
-                task.cancel()
-            if self._leader_task is not None:
-                self._leader_task.cancel()
-            await asyncio.gather(
-                *self._leader_children, *self._tasks,
-                *([self._leader_task] if self._leader_task else []),
-                return_exceptions=True,
-            )
-            if self.webhook is not None:
-                await self.webhook.stop()
-            if self._lock is not None:
-                await self._lock.release()
-            if self.uw is not None:
-                await self.uw.close()
-            if self.db is not None:
-                await self.db.close()
-        except Exception:
-            logger.exception("Automation shutdown error")
-
-    # -----------------------------------------------------
-    def flag_summary(self) -> str:
-        f = self.settings.flags
-        names = [name for name, on in vars(f).items() if on]
-        return "flags=" + (",".join(names) if names else "none")
-
-    def health(self) -> dict:
-        return {
-            "automation_ready": self.ready,
-            "leader": self.is_leader,
-            "flags": {k: v for k, v in vars(self.settings.flags).items()},
-        }
-
-    def _spawn(self, coro, name: str) -> asyncio.Task:
-        task = asyncio.create_task(coro, name=name)
-        self._tasks.add(task)
-        task.add_done_callback(self._tasks.discard)
-        return task
-
-    async def _schedule_signal(self, signal_db_id: int) -> None:
-        if self.pipeline is not None:
-            self._spawn(self.pipeline.process(signal_db_id), f"qa-signal-{signal_db_id}")
-
-    # -----------------------------------------------------
-    # Leader election + leader-only loops
-    # -----------------------------------------------------
-    async def _leader_loop(self) -> None:
-        assert self.settings.database_url
-        self._lock = LeaderLock(self.settings.database_url)
-        while True:
-            try:
-                acquired = await self._lock.try_acquire()
-            except asyncio.CancelledError:
-                raise
-            except Exception as error:
-                logger.warning("Leader lock unavailable: %s", type(error).__name__)
-                acquired = False
-
-            if not acquired:
-                self.is_leader = False
-                await asyncio.sleep(LEADER_RETRY_SECONDS)
-                continue
-
-            self.is_leader = True
-            logger.info("This instance is the automation leader")
-            self._leader_children = [
-                asyncio.create_task(self._maintenance_loop(), name="qa-maintenance")
-            ]
-            self._leader_children.append(asyncio.create_task(self.weekly_messages.run(), name="qa-weekly-messages"))
-            self._leader_children.append(asyncio.create_task(self.weekly_report.run(), name="qa-weekly-report"))
-            if self.uw is not None:
-                self._leader_children.append(asyncio.create_task(self.private_continuation.run(), name="qa-private-continuation"))
-            if closing_enabled():
-                self._leader_children.append(asyncio.create_task(self.closing_message.run(), name="qa-closing-message"))
-            if prayer_enabled():
-                self._leader_children.append(asyncio.create_task(self.opening_prayer.run(), name="qa-opening-prayer"))
-            f = self.settings.flags
-            if f.liquidity_radar and self.radar is not None:
-                self._leader_children.append(asyncio.create_task(self.radar.run(), name="qa-radar"))
-            if f.liquidity_radar and self.company_radar is not None:
-                self._leader_children.append(asyncio.create_task(self.company_radar.run(), name="qa-company-radar"))
-            if opportunity_enabled('SPX_RADAR') and self.spx_radar is not None:
-                self._leader_children.append(asyncio.create_task(self.spx_radar.run(), name="qa-spx-unusual"))
-            if self.opportunities is not None and (opportunity_enabled('REENTRY') or opportunity_enabled('SPX_RADAR')):
-                self._leader_children.append(asyncio.create_task(self.opportunities.run(), name="qa-opportunities"))
-            if f.tracking and self.contract_support is not None:
-                self._leader_children.append(asyncio.create_task(self.contract_support.run(), name="qa-contract-support"))
-            if f.uw_watch and self.watch is not None:
-                self._leader_children.append(
-                    asyncio.create_task(self.watch.run(), name="qa-watch")
-                )
-            if f.tracking or f.proposals:
-                self._leader_children.append(
-                    asyncio.create_task(self.tracker.run(), name="qa-tracker")
-                )
-            try:
-                while await self._lock.still_held():
-                    await asyncio.sleep(LEADER_RETRY_SECONDS)
-            finally:
-                for task in self._leader_children:
-                    task.cancel()
-                await asyncio.gather(*self._leader_children, return_exceptions=True)
-                self._leader_children = []
-                self.is_leader = False
-            logger.warning("Leader lock lost; retrying")
-
-    async def _maintenance_loop(self) -> None:
-        while True:
-            try:
-                await self._maintenance()
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                logger.exception("Maintenance tick failed")
-            await asyncio.sleep(MAINTENANCE_SECONDS)
-
-    async def _maintenance(self) -> None:
-        db = self.db
-        assert db is not None and self.publisher is not None
-        # Signals stored but never processed (e.g. crash right after insert).
-        for row in await db.fetch(q.UNPROCESSED_SIGNALS, 20.0):
-            await self._schedule_signal(row["id"])
-        await db.fetch(q.FAIL_STALE_PROCESSING, 600.0)
-        await db.fetch(q.RECOVER_STUCK_APPROVING, 120.0)
-        # Expired proposals: remove buttons.
-        for proposal in await db.fetch(q.EXPIRE_PROPOSALS):
-            if proposal["classification"] == "MANUAL":
-                # Private previews expire silently; never leak them to the channel.
-                continue
-            for message_id in (proposal["message_id"], proposal["reconfirm_message_id"]):
-                if message_id:
-                    try:
-                        await self.app.bot.edit_message_reply_markup(
-                            chat_id=self.settings.signal_chat_id,
-                            message_id=message_id,
-                            reply_markup=None,
-                        )
-                    except Exception:
-                        pass
-            await self.publisher.text(f"⌛ Proposal #{proposal['id']} EXPIRED")
-        for trade in await db.fetch(q.PENDING_OWNER_EXITS):
-            await self.tracker.send_public_exit(trade)
-            if self.settings.flags.highest_card:
-                await self.tracker.send_highest_card(trade)
-        for trade in await db.fetch("""SELECT t.* FROM trades t WHERE t.status='CLOSED'
-            AND t.approval_quote->>'trade_mode'='HERO_OR_ZERO'
-            AND t.close_reason IS DISTINCT FROM 'OWNER_DELETED'
-            AND (NOT EXISTS (SELECT 1 FROM events e WHERE e.entity_type='trade' AND e.entity_id=t.id
-                AND e.event_type='HIGHEST_CARD' AND e.status='SENT')
-            OR (t.publication_chat_id='both' AND NOT EXISTS (SELECT 1 FROM events e
-                WHERE e.entity_type='trade' AND e.entity_id=t.id
-                AND e.event_type='HIGHEST_CARD_PRIVATE' AND e.status='SENT')))
-            ORDER BY t.closed_at LIMIT 50"""):
-            await self.tracker.send_highest_card(trade)
-        # Retry definite closing-card failures even after the trade leaves TRACKING.
-        for trade in await db.fetch(routing.PENDING_CLOSE_PUBLICATIONS):
-            reason = trade['close_reason']
-            if reason == 'BREAKEVEN_EXIT':
-                await self.tracker.send_breakeven_exit(trade)
-            elif reason in ('STOP_LOSS_30','STOP_LOSS_50'):
-                if self.settings.flags.stop_loss_card:
-                    await self.tracker.send_stop_loss_card(trade)
-            else:
-                await self.tracker.send_public_exit(trade)
-            if reason != 'BREAKEVEN_EXIT' and self.settings.flags.highest_card:
-                await self.tracker.send_highest_card(trade)
-
-        await self._send_daily_report_if_due()
-
-    async def _send_daily_report_if_due(self) -> None:
-        """Send one report after all of today's trades have closed."""
-        assert self.db is not None and self.publisher is not None
-        await self.session_finish.tick()
-        now = utcnow()
-        local = to_et(now)
-        if local.weekday() >= 5:
-            return
-        day = et_date(now)
-        report_at = et_datetime(day, self.settings.market.close_et) + timedelta(
-            minutes=DAILY_REPORT_DELAY_MINUTES
-        )
-        if now < report_at:
-            return
-        trades = await self.db.fetch(q.DAILY_TRADES, day)
-        if not trades and not (day.weekday()==4 and weekly_report_enabled() and routing.enabled()):
-            return
-        # Each channel closes its own report independently of other channels.
-        finished = await requested_channels(self.db, day)
-        groups = routing.report_groups(trades)
-        if day.weekday()==4 and weekly_report_enabled() and routing.enabled():
-            groups.setdefault(routing.PRIVATE_CHAT, [])
-        for chat_id, group in groups.items():
-            if chat_id in finished:continue
-            if any(t['status'] == 'TRACKING' for t in group):
-                continue
-            text, payload = daily_report_text(group,day,self.settings.tracking.success_premium_gain)
-            await self.publisher.text_once('daily',int(day.strftime('%Y%m%d')),
-                'DAILY_REPORT_'+str(chat_id),text,payload=payload,chat_id=chat_id)
-        if any(trade['status'] == 'TRACKING' for trade in trades):
-            return
-        text = admin_report(trades, day, self.settings.tracking.success_premium_gain)
-        await send_pages(self, "daily", int(day.strftime("%Y%m%d")),
-                         "DAILY_REPORT", text)
-
-    # -----------------------------------------------------
-    # Owner-only automation commands
-    # -----------------------------------------------------
-    def _is_owner(self, update: Update) -> bool:
-        owner = self.settings.owner_user_id
-        user = update.effective_user
-        return owner is not None and user is not None and user.id == owner
-
-    async def _guard(self, update: Update) -> bool:
-        if update.message is None:
-            return False
-        if not self._is_owner(update):
-            logger.warning(
-                "Unauthorized automation command from user %s",
-                getattr(update.effective_user, "id", None),
-            )
-            await update.message.reply_text("⛔ غير مصرح.")
-            return False
-        if not self.ready:
-            await update.message.reply_text("⚠️ الأتمتة غير جاهزة. راجعي السجل.")
-            return False
-        return True
-
-    async def cmd_delete(self, update, context):
-        await delete_trade_command(self, update, context)
-
-    async def cmd_status(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        if not await self._guard(update):
-            return
-        trades = await self.db.fetch(q.TRACKING_TRADES)
-        last_obs = await self.db.fetchval(q.LAST_GOOD_OBSERVATION)
-        lines = [
-            "🦋 <b>QUIET ALPHA — Automation Status</b>",
-            f"Leader: {'yes' if self.is_leader else 'no'}",
-            self.flag_summary(),
-            f"Tracking trades: {len(trades)}",
-            f"Last UW watch observation: {last_obs.isoformat() if last_obs else '—'}",
-        ]
-        lines.append(f"Tracking cadence: target {self.settings.tracking.poll_seconds}s · live message {self.settings.tracking.message_refresh_seconds}s")
-        cycle = getattr(self.tracker, 'last_cycle_seconds', None)
-        if cycle is not None:
-            lines.append(f"Last tracking cycle: {cycle:.2f}s")
-        lines.append('Automatic entries: '+('paused for today' if await session_stopped(self.db) else 'enabled'))
-        lines.append('Channels: '+('enabled · public/private/both selection' if routing.enabled() else 'admin only for new trades'))
-        lines.append(f"Approval price tolerance: ${self.settings.approval.confirmation_tolerance_abs} · configured price range enforced")
-        if self.uw is not None:
-            lines.append(
-                f"UW requests (this process): {self.uw.request_count} · "
-                f"429: {self.uw.rate_limited_count} · errors: {self.uw.error_count}"
-            )
-            if self.uw.last_rate:
-                lines.append("UW headers: " + ", ".join(
-                    f"{k.replace('x-uw-', '')}={v}" for k, v in self.uw.last_rate.items()
-                ))
-        if self.tracker and self.tracker.last_error:
-            lines.append(f"Tracker last error: {self.tracker.last_error}")
-        if self.liquidity and self.liquidity.last_error:
-            lines.append(f"Liquidity data: {self.liquidity.last_error}")
-        if self.radar and self.radar.last_error:
-            lines.append(f"Radar data: {self.radar.last_error}")
-        if self.watch and self.watch.last_error:
-            lines.append(f"Watch last error: {self.watch.last_error}")
-        if self.contract_support is not None and self.settings.flags.tracking:
-            lines.append("Contract support: enabled · once after success · checks every 60s")
-            if self.contract_support.last_error:
-                lines.append(f"Contract support data: {self.contract_support.last_error}")
-        lines.append(f"Opening prayer: {'enabled' if prayer_enabled() else 'disabled'} · 15m before NY open (16:15 summer / 17:15 winter Riyadh) · approval stays available")
-        lines.append('Daily report: market close + 2m · waits for closed trades')
-        lines.append("Private continuation: +50% · momentum + flow · private only · one child")
-        lines.append("Weekly report: Friday · private only · after daily report and closing greeting")
-        lines.append(f"Closing message: {'enabled' if closing_enabled() else 'disabled'} · after channel report · approval stays available")
-        lines.append('Hero or Zero: /H · no stops · tracks until expiry session close')
-        lines.append("Weekly messages: Monday 12:00 Riyadh · welcome then instructions · owner approval stays available")
-        if self.weekly_messages.last_error:
-            lines.append(f"Weekly messages data: {self.weekly_messages.last_error}")
-        if self.closing_message.last_error:
-            lines.append(f"Closing message data: {self.closing_message.last_error}")
-        if self.opening_prayer.last_error:
-            lines.append(f"Opening prayer data: {self.opening_prayer.last_error}")
-        if self.opportunities is not None:
-            lines.append(f"Reentry watch: {'enabled' if opportunity_enabled('REENTRY') else 'disabled'} · previous entry + configured tolerance · approval required")
-            lines.append(f"SPX unusual radar: {'enabled' if opportunity_enabled('SPX_RADAR') else 'disabled'} · 0DTE · $1M / 5m · >=3x · approval required")
-            if self.opportunities.last_error:
-                lines.append(f"Opportunity data: {self.opportunities.last_error}")
-            if opportunity_enabled('SPX_RADAR') and self.spx_radar is not None:
-                lines.append(f"SPX radar check: {self.spx_radar.last_check_at or 'waiting'} · checked {self.spx_radar.scanned} · insufficient history {self.spx_radar.insufficient_history}")
-                if self.spx_radar.last_error:
-                    lines.append(f"SPX radar data: {self.spx_radar.last_error}")
-        if self.company_radar is not None and self.settings.flags.liquidity_radar:
-            monitor = self.company_radar
-            lines.append("Company radar: enabled · 10 stocks · all expiries · $1M / 5m · activity >=3x")
-            lines.append(f"Company radar check: {monitor.last_check_at or 'waiting for session'} · checked {monitor.scanned} · insufficient history {monitor.insufficient_history}")
-            if monitor.last_error:
-                lines.append(f"Company radar data: {monitor.last_error}")
-        for warning in self.disabled:
-            lines.append(f"⚠️ {warning}")
-        for t in trades[:10]:
-            lines.append(
-                f"#{t['id']} {t['option_symbol']} entry {usd(t['approved_entry'])} "
-                f"bid {usd(t['current_bid'])} high {usd(t['highest_bid'])}"
-            )
-        await update.message.reply_html("\n".join(lines))
-
-    async def cmd_close(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        if not await self._guard(update):
-            return
-        if len(context.args) != 1 or not context.args[0].isdigit():
-            await update.message.reply_text("الاستخدام: /qa_close <trade_id>")
-            return
-        try:
-            closed = await self.tracker.close(int(context.args[0]), "MANUAL_CLOSE")
-        except ValueError as error:
-            await update.message.reply_text(str(error))
-            return
-        await update.message.reply_text(
-            "✅ تم إغلاق المتابعة." if closed else "لا توجد صفقة TRACKING بهذا الرقم."
-        )
-
-    async def cmd_channels(self, update, context):
-        if not await self._guard(update):
-            return
-        lines = ['🦋 QUIET ALPHA — قنوات النشر']
-        for chat in (routing.PUBLIC_CHAT,routing.PRIVATE_CHAT):
-            try:
-                await routing.check_permission(self.app.bot,chat,self.settings.signal_chat_id)
-                lines.append(f'✅ {routing.channel_name(chat)}: البوت يملك صلاحية النشر')
-            except Exception:
-                lines.append(f'❌ {routing.channel_name(chat)}: تعذر التحقق من صلاحية النشر')
-        lines.append('اختيار القنوات: '+('مفعّل' if routing.enabled() else 'غير مفعّل'))
-        await update.message.reply_text('\n'.join(lines))
-
-    async def cmd_daily(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Owner-only preview; does not consume the automatic daily report."""
-        if not await self._guard(update):
-            return
-        day = et_date(utcnow())
-        if len(context.args) > 1:
-            await update.message.reply_text("الاستخدام: /qa_daily أو /qa_daily yesterday أو /qa_daily YYYY-MM-DD")
-            return
-        if context.args:
-            requested = context.args[0].strip().lower()
-            if requested in ("yesterday", "أمس", "امس"):
-                day -= timedelta(days=1)
-            else:
-                try:
-                    day = date.fromisoformat(requested)
-                except ValueError:
-                    await update.message.reply_text("التاريخ بصيغة YYYY-MM-DD، أو اكتبي /qa_daily yesterday")
-                    return
-        trades = await self.db.fetch(q.DAILY_TRADES, day)
-        if not trades:
-            await update.message.reply_text(f"لا توجد صفقات مسجلة بتاريخ {day.isoformat()} حسب توقيت سوق نيويورك.")
-            return
-        text = admin_report(trades, day, self.settings.tracking.success_premium_gain, preview=True)
-        for part in pages(text):
-            await update.message.reply_html(part)
-
-    async def cmd_liquidity_check(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        if not await self._guard(update):
-            return
-        if self.uw is None:
-            await update.message.reply_text("UW غير متصل.")
-            return
-        from .uw_client import UWError
-        try:
-            response = await self.uw.get("/api/option-trades", {
-                "ticker_symbol": "SPX", "min_dte": 0, "max_dte": 0, "limit": 1,
-            })
-        except UWError as error:
-            await update.message.reply_text(
-                f"تعذر التحقق من بيانات التدفقات: {error.kind}. "
-                "لا يُفعّل اختيار السيولة قبل التأكد من صلاحية هذا المصدر في اشتراك UW."
-            )
-            return
-        await update.message.reply_text(
-            "✅ مصدر التدفقات متاح للاشتراك. "
-            "يظل فحص اكتمال وحداثة البيانات مطلوبًا أثناء الجلسة."
-        )
-
-    async def cmd_radar(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        if not await self._guard(update):
-            return
-        if self.liquidity is None:
-            await update.message.reply_text("بيانات UW غير متاحة.")
-            return
-        now = utcnow()
-        from .timeutil import within_session
-        if to_et(now).weekday() >= 5 or not within_session(now, self.settings.market.open_et, self.settings.market.close_et):
-            await update.message.reply_text("المعاينة الحية متاحة أثناء جلسة السوق فقط؛ لا نعرض جلسة قديمة كقراءة اليوم.")
-            return
-        opened = et_datetime(et_date(now), self.settings.market.open_et)
-        end = now.replace(second=0, microsecond=0)
-        start = max(opened, end - timedelta(hours=1))
-        snapshot = await self.liquidity.radar_snapshot(start, end)
-        observed_at = utcnow()
-        if not snapshot.fresh(observed_at, max_age=180):
-            await update.message.reply_text("بانتظار تدفقات مكتملة وحديثة. " + (snapshot.reason or "NO_FRESH_DATA"))
-            return
-        await update.message.reply_html(radar_text(snapshot, observed_at, start == opened))
-
-    async def cmd_highest(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        if not await self._guard(update):
-            return
-        if not self.settings.flags.highest_card:
-            await update.message.reply_text("HIGHEST_CARD_ENABLED غير مفعّل.")
-            return
-        if len(context.args) != 1 or not context.args[0].isdigit():
-            await update.message.reply_text("الاستخدام: /qa_highest <trade_id>")
-            return
-        trade = await self.db.fetchrow(q.GET_TRADE, int(context.args[0]))
-        if trade is None:
-            await update.message.reply_text("لا توجد صفقة بهذا الرقم.")
-            return
-        sent = await self.tracker.send_highest_card(trade)
-        if sent:
-            await update.message.reply_text("✅ أُرسلت بطاقة Highest Price إلى القناة.")
-        else:
-            await update.message.reply_text(
-                "لم تُرسل: إما أُرسلت سابقًا، أو الصفقة لم تحقق +$50، "
-                "أو أعلى Observed Bid ليس أعلى من الدخول."
-            )
-
-
-    async def cmd_reconcile(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        if not await self._guard(update):
-            return
-        args = context.args or []
-        if len(args) != 2 or not args[0].isdigit() or args[1] not in ("sent", "resend"):
-            await update.message.reply_text(
-                "الاستخدام: /qa_reconcile <event_id> sent|resend"
-            )
-            return
-        row = await self.tracker.reconcile_event(int(args[0]), args[1])
-        if row is None:
-            await update.message.reply_text(
-                "لا يوجد حدث بهذا الرقم بحالة NEEDS_RECONCILIATION."
-            )
-            return
-        await update.message.reply_text(
-            f"✅ Event #{row['id']} → {row['status']}"
-            + (" (سيُعاد إرساله في الـPoll التالي)" if row["status"] == "FAILED" else "")
-        )
-
-
-def setup_automation(application: Application, renderers: CardRenderers) -> Optional[AutomationRuntime]:
-    """Register automation hooks/handlers. Never raises."""
-    try:
-        settings = load_settings()
-    except Exception:
-        logger.exception("Automation settings invalid — manual bot only")
+def _env(name: str) -> Optional[str]:
+    value = os.getenv(name)
+    if value is None:
         return None
+    value = value.strip()
+    return value if value != "" else None
 
-    runtime = AutomationRuntime(application, settings, renderers)
 
-    previous_init = application.post_init
-    previous_shutdown = application.post_shutdown
+def env_bool(name: str, default: bool = False) -> bool:
+    raw = _env(name)
+    if raw is None:
+        return default
+    lowered = raw.lower()
+    if lowered in _TRUE:
+        return True
+    if lowered in _FALSE:
+        return False
+    raise ValueError(f"{name} must be true/false")
 
-    async def post_init(app: Application) -> None:
-        if previous_init is not None:
-            await previous_init(app)
-        await runtime.start(app)
 
-    async def post_shutdown(app: Application) -> None:
-        await runtime.stop(app)
-        if previous_shutdown is not None:
-            await previous_shutdown(app)
+def env_int(name: str, default: Optional[int]) -> Optional[int]:
+    raw = _env(name)
+    if raw is None or raw.lower() == "none":
+        return default if raw is None else None
+    return int(raw)
 
-    application.post_init = post_init
-    application.post_shutdown = post_shutdown
 
-    application.add_handler(
-        CallbackQueryHandler(runtime.approval.on_callback, pattern=r"^qa:")
+def env_decimal(name: str, default: Optional[str]) -> Optional[Decimal]:
+    raw = _env(name)
+    if raw is None:
+        return Decimal(default) if default is not None else None
+    if raw.lower() == "none":
+        return None
+    try:
+        return Decimal(raw)
+    except InvalidOperation as error:
+        raise ValueError(f"{name} must be a number") from error
+
+
+def env_str(name: str, default: Optional[str]) -> Optional[str]:
+    raw = _env(name)
+    if raw is None:
+        return default
+    if raw.lower() == "none":
+        return None
+    return raw
+
+
+def env_time(name: str, default: Optional[str]) -> Optional[time]:
+    raw = env_str(name, default)
+    if raw is None:
+        return None
+    hours, minutes = raw.split(":")
+    return time(int(hours), int(minutes))
+
+
+def parse_owner_user_id(raw: Optional[str]) -> Optional[int]:
+    """Return a positive Telegram user id, or None if missing/invalid.
+
+    A Telegram *user* id is always a positive integer. Negative ids belong
+    to groups/channels and are rejected here on purpose: a chat id must
+    never be used as an owner id.
+    """
+    if raw is None:
+        return None
+    raw = raw.strip()
+    if not raw.isdigit():
+        return None
+    value = int(raw)
+    return value if value > 0 else None
+
+
+def automation_requested() -> bool:
+    """Master switch, read without building the full config."""
+    try:
+        return env_bool("AUTOMATION_ENABLED", False)
+    except ValueError:
+        return False
+
+
+# =========================================================
+# Settings
+# =========================================================
+
+
+@dataclass(frozen=True)
+class Flags:
+    tv_intake: bool
+    uw_watch: bool
+    uw_watch_notify: bool
+    matching: bool
+    selection: bool
+    proposals: bool
+    tracking: bool
+    milestones: bool
+    success_card: bool
+    highest_card: bool
+    stop_loss_card: bool
+    liquidity_radar: bool = False
+    flow_selection: bool = False
+    breakeven_exit: bool = False
+
+    @classmethod
+    def from_env(cls) -> "Flags":
+        return cls(
+            tv_intake=env_bool("TV_INTAKE_ENABLED"),
+            uw_watch=env_bool("UW_WATCH_ENABLED"),
+            uw_watch_notify=env_bool("UW_WATCH_NOTIFY"),
+            matching=env_bool("MATCHING_ENABLED"),
+            selection=env_bool("SELECTION_ENABLED"),
+            proposals=env_bool("PROPOSALS_ENABLED"),
+            tracking=env_bool("TRACKING_ENABLED"),
+            milestones=env_bool("MILESTONES_ENABLED"),
+            success_card=env_bool("SUCCESS_CARD_ENABLED"),
+            highest_card=env_bool("HIGHEST_CARD_ENABLED"),
+            stop_loss_card=env_bool("STOP_LOSS_CARD_ENABLED"),
+            liquidity_radar=env_bool("LIQUIDITY_RADAR_ENABLED"),
+            flow_selection=env_bool("FLOW_SELECTION_ENABLED"),
+            breakeven_exit=env_bool("BREAKEVEN_EXIT_ENABLED"),
+        )
+
+
+@dataclass(frozen=True)
+class UWSettings:
+    base_url: str
+    timeout_seconds: float
+    max_retries: int
+    # DEVELOPMENT / SHADOW DEFAULT: which ticker path returns SPXW rows is
+    # verified by tools/uw_basic_probe.py. Tried in order.
+    chain_tickers: tuple[str, ...]
+    chain_max_pages: int
+    contract_root: str
+    spot_ticker: str
+
+
+@dataclass(frozen=True)
+class WatchSettings:
+    ticker: str
+    # DEVELOPMENT / SHADOW DEFAULTS — not final trading rules.
+    poll_seconds: int
+    window_minutes: int
+    min_net_premium: Decimal
+    min_strength: Decimal
+    cooldown_minutes: int
+    use_flow_alerts: bool
+    flow_alerts_limit: int
+
+
+@dataclass(frozen=True)
+class MatchSettings:
+    # DEVELOPMENT / SHADOW DEFAULTS — not final trading rules.
+    window_minutes: int
+    mixed_policy: str  # "CONFLICT" or "LATEST"
+    expiry_grace_seconds: int
+    rules_version: str
+
+
+@dataclass(frozen=True)
+class SelectionSettings:
+    # Approved preferred premium range.
+    premium_min: Decimal
+    premium_max: Decimal
+    # Hard filters left disabled (None) until real data exists.
+    max_spread_abs: Optional[Decimal]
+    max_spread_pct: Optional[Decimal]
+    min_volume: Optional[int]
+    min_open_interest: Optional[int]
+    delta_min_abs: Optional[Decimal]
+    delta_max_abs: Optional[Decimal]
+    max_tape_age_seconds: Optional[int]
+    require_positive_bid: bool
+    # DEVELOPMENT / SHADOW DEFAULT ranking weights.
+    weight_spread: Decimal
+    weight_liquidity: Decimal
+    weight_centrality: Decimal
+    weight_delta: Decimal
+    weight_freshness: Decimal
+    weight_distance: Decimal
+    delta_target_abs: Decimal
+    top_n_reported: int
+    flow_window_minutes: int = 10
+    flow_max_pages: int = 20
+    alternative_attempts: int = 2
+    momentum_max_age_seconds: int = 300
+
+
+@dataclass(frozen=True)
+class EntrySettings:
+    # DEVELOPMENT / SHADOW DEFAULTS — not final trading rules.
+    window_seconds: int
+    poll_seconds: int
+    wait_spread_pct: Optional[Decimal]
+    stability_max_move: Optional[Decimal]
+    chase_limit_pct: Optional[Decimal]
+    on_window_end: str  # "ENTER" or "SKIP"
+    max_signal_age_seconds: Optional[int]
+    last_entry_time_et: Optional[time]
+
+
+@dataclass(frozen=True)
+class ApprovalSettings:
+    # DEVELOPMENT / SHADOW DEFAULTS — not final trading rules.
+    tolerance_abs: Optional[Decimal]
+    tolerance_pct: Optional[Decimal]
+    proposal_expiry_seconds: Optional[int]
+    require_in_range: bool
+    confirmation_tolerance_abs: Decimal = Decimal("0.30")
+
+
+@dataclass(frozen=True)
+class TrackingSettings:
+    # DEVELOPMENT / SHADOW DEFAULT polling. Final value comes from the probe.
+    poll_seconds: int
+    message_refresh_seconds: int
+    milestone_step_pct: int
+    # Approved rule: SUCCESS = approved_entry + $0.50 (+$50 gross/contract).
+    success_premium_gain: Decimal
+    # Before SUCCESS: close at entry minus 35%.
+    stop_loss_pct: Decimal
+    # After SUCCESS: protect capital at entry minus $0.20 premium.
+    protected_stop_buffer: Decimal
+    stop_time_et: time
+    # OPEN DECISION: "none" (default) or "on_close".
+    highest_card_trigger: str
+    # A ledger event left PENDING longer than this (crash/redeploy during a
+    # send) is moved to NEEDS_RECONCILIATION. Must exceed the longest send
+    # (photo timeouts total 240s), so the default 600s never races a live send.
+    pending_stale_seconds: int = 600
+    breakeven_drawdown_pct: Decimal = Decimal("0.35")
+    group_milestones: bool = True
+
+
+@dataclass(frozen=True)
+class MarketSettings:
+    open_et: time
+    close_et: time
+    display_timezone: str
+
+
+@dataclass(frozen=True)
+class Settings:
+    bot_token: Optional[str]
+    signal_chat_id: Optional[str]
+    owner_user_id: Optional[int]
+    uw_api_key: Optional[str] = field(repr=False, default=None)
+    tv_webhook_secret: Optional[str] = field(repr=False, default=None)
+    database_url: Optional[str] = field(repr=False, default=None)
+    port: int = 8080
+    webhook_path: str = "/webhook/tradingview"
+    webhook_max_body_bytes: int = 16384
+    notify_signal_status: bool = True
+    flags: Flags = None  # type: ignore[assignment]
+    uw: UWSettings = None  # type: ignore[assignment]
+    watch: WatchSettings = None  # type: ignore[assignment]
+    match: MatchSettings = None  # type: ignore[assignment]
+    selection: SelectionSettings = None  # type: ignore[assignment]
+    entry: EntrySettings = None  # type: ignore[assignment]
+    approval: ApprovalSettings = None  # type: ignore[assignment]
+    tracking: TrackingSettings = None  # type: ignore[assignment]
+    market: MarketSettings = None  # type: ignore[assignment]
+
+    def __repr__(self) -> str:  # never print secrets
+        return "Settings(<redacted>)"
+
+    def problems(self) -> list[str]:
+        """Human-readable configuration problems (no secret values)."""
+        issues: list[str] = []
+        if not self.bot_token:
+            issues.append("BOT_TOKEN is missing")
+        if not self.signal_chat_id:
+            issues.append("SIGNAL_CHAT_ID is missing")
+        if self.owner_user_id is None:
+            issues.append(
+                "OWNER_USER_ID is missing or invalid "
+                "(must be a positive Telegram user id)"
+            )
+        if not self.database_url:
+            issues.append("DATABASE_URL is missing")
+        uw_needed = (
+            self.flags.uw_watch
+            or self.flags.selection
+            or self.flags.tracking
+            or self.flags.liquidity_radar
+            or self.flags.flow_selection
+        )
+        if uw_needed and not self.uw_api_key:
+            issues.append("UW_API_KEY is missing")
+        if self.flags.tv_intake and not self.tv_webhook_secret:
+            issues.append("TV_WEBHOOK_SECRET is missing")
+        if self.match.mixed_policy not in {"CONFLICT", "LATEST"}:
+            issues.append("MATCH_MIXED_POLICY must be CONFLICT or LATEST")
+        if self.entry.on_window_end not in {"ENTER", "SKIP"}:
+            issues.append("ENTRY_ON_WINDOW_END must be ENTER or SKIP")
+        if self.tracking.highest_card_trigger not in {"none", "on_close"}:
+            issues.append("HIGHEST_CARD_TRIGGER must be none or on_close")
+        if self.selection.premium_min >= self.selection.premium_max:
+            issues.append("PREMIUM_MIN must be below PREMIUM_MAX")
+        if self.tracking.milestone_step_pct <= 0:
+            issues.append("MILESTONE_STEP_PCT must be positive")
+        if not Decimal("0") < self.tracking.stop_loss_pct < Decimal("1"):
+            issues.append("STOP_LOSS_PCT must be greater than 0 and below 1")
+        if self.tracking.protected_stop_buffer < Decimal("0"):
+            issues.append("PROTECTED_STOP_BUFFER must not be negative")
+        return issues
+
+
+def load_settings() -> Settings:
+    flags = Flags.from_env()
+
+    uw = UWSettings(
+        base_url=env_str("UW_BASE_URL", "https://api.unusualwhales.com"),
+        timeout_seconds=float(env_str("UW_TIMEOUT_SECONDS", "10")),
+        max_retries=env_int("UW_MAX_RETRIES", 2) or 0,
+        chain_tickers=tuple(
+            item.strip()
+            for item in env_str("UW_CHAIN_TICKERS", "SPX,SPXW").split(",")
+            if item.strip()
+        ),
+        chain_max_pages=env_int("UW_CHAIN_MAX_PAGES", 4) or 1,
+        contract_root=env_str("UW_CONTRACT_ROOT", "SPXW"),
+        spot_ticker=env_str("UW_SPOT_TICKER", "SPX"),
     )
-    application.add_handler(CallbackQueryHandler(runtime.radar_publication.callback, pattern=r"^qar:"))
-    application.add_handler(CallbackQueryHandler(runtime.opening_prayer.callback, pattern=r"^qad:"))
-    application.add_handler(CallbackQueryHandler(runtime.weekly_messages.callback, pattern=r"^qaw:"))
-    application.add_handler(CallbackQueryHandler(runtime.closing_message.callback, pattern=r"^qac:"))
-    application.add_handler(CommandHandler(["h", "H"], runtime.manual.hero_command))
-    application.add_handler(CommandHandler("qa_track", runtime.manual.command))
-    application.add_handler(CommandHandler("qa_exit", runtime.manual_exit.command))
-    application.add_handler(CallbackQueryHandler(runtime.manual.callback, pattern=r"^qam:"))
-    application.add_handler(CommandHandler(["d", "D"], runtime.cmd_delete))
-    application.add_handler(CommandHandler("finish", runtime.session_finish.command))
-    application.add_handler(CallbackQueryHandler(runtime.session_finish.callback, pattern=r"^qaf:"))
-    application.add_handler(CommandHandler("qa_status", runtime.cmd_status))
-    application.add_handler(CommandHandler("qa_channels", runtime.cmd_channels))
-    application.add_handler(CommandHandler("qa_close", runtime.cmd_close))
-    application.add_handler(CommandHandler("qa_daily", runtime.cmd_daily))
-    application.add_handler(CommandHandler("qa_radar", runtime.cmd_radar))
-    application.add_handler(CommandHandler("qa_liquidity_check", runtime.cmd_liquidity_check))
-    application.add_handler(CommandHandler("qa_highest", runtime.cmd_highest))
-    application.add_handler(CommandHandler("qa_reconcile", runtime.cmd_reconcile))
-    application.bot_data["quiet_alpha_runtime"] = runtime
-    logger.info("Automation hooks registered")
-    return runtime
+
+    watch = WatchSettings(
+        ticker=env_str("UW_WATCH_TICKER", "SPX"),
+        poll_seconds=env_int("UW_WATCH_POLL_SECONDS", 60) or 60,
+        window_minutes=env_int("UW_WATCH_WINDOW_MINUTES", 5) or 5,
+        min_net_premium=env_decimal("UW_WATCH_MIN_NET_PREMIUM", "1000000"),
+        min_strength=env_decimal("UW_WATCH_MIN_STRENGTH", "0.30"),
+        cooldown_minutes=env_int("UW_WATCH_COOLDOWN_MINUTES", 15) or 15,
+        use_flow_alerts=env_bool("UW_WATCH_USE_FLOW_ALERTS", True),
+        flow_alerts_limit=env_int("UW_WATCH_FLOW_ALERTS_LIMIT", 100) or 100,
+    )
+
+    match = MatchSettings(
+        window_minutes=env_int("MATCH_WINDOW_MINUTES", 30) or 30,
+        mixed_policy=(env_str("MATCH_MIXED_POLICY", "CONFLICT") or "").upper(),
+        expiry_grace_seconds=env_int("UW_WATCH_EXPIRY_GRACE_SECONDS", 60) or 0,
+        rules_version=env_str("MATCH_RULES_VERSION", "match-v1-dev"),
+    )
+
+    selection = SelectionSettings(
+        premium_min=env_decimal("PREMIUM_MIN", "1.00"),
+        premium_max=env_decimal("PREMIUM_MAX", "4.50"),
+        max_spread_abs=env_decimal("MAX_SPREAD_ABS", None),
+        max_spread_pct=env_decimal("MAX_SPREAD_PCT", None),
+        min_volume=env_int("MIN_VOLUME", None),
+        min_open_interest=env_int("MIN_OPEN_INTEREST", None),
+        delta_min_abs=env_decimal("DELTA_MIN_ABS", None),
+        delta_max_abs=env_decimal("DELTA_MAX_ABS", None),
+        max_tape_age_seconds=env_int("MAX_TAPE_AGE_SECONDS", None),
+        require_positive_bid=env_bool("REQUIRE_POSITIVE_BID", True),
+        weight_spread=env_decimal("W_SPREAD", "0.40"),
+        weight_liquidity=env_decimal("W_LIQUIDITY", "0.25"),
+        weight_centrality=env_decimal("W_CENTRALITY", "0.15"),
+        weight_delta=env_decimal("W_DELTA", "0.10"),
+        weight_freshness=env_decimal("W_FRESHNESS", "0.10"),
+        weight_distance=env_decimal("W_DISTANCE", "0"),
+        delta_target_abs=env_decimal("DELTA_TARGET_ABS", "0.30"),
+        top_n_reported=env_int("TOP_N_REPORTED", 3) or 3,
+        flow_window_minutes=max(1, env_int("FLOW_WINDOW_MINUTES", 10) or 10),
+        flow_max_pages=max(1, env_int("FLOW_MAX_PAGES", 20) or 20),
+        alternative_attempts=max(0, env_int("ALTERNATIVE_ATTEMPTS", 2) or 0),
+        momentum_max_age_seconds=max(30, env_int("MOMENTUM_MAX_AGE_SECONDS", 300) or 300),
+    )
+
+    entry = EntrySettings(
+        window_seconds=env_int("ENTRY_WINDOW_SECONDS", 30) or 0,
+        poll_seconds=env_int("ENTRY_POLL_SECONDS", 10) or 10,
+        wait_spread_pct=env_decimal("ENTRY_WAIT_SPREAD_PCT", "0.10"),
+        stability_max_move=env_decimal("ENTRY_STABILITY_MAX_MOVE", "0.10"),
+        chase_limit_pct=env_decimal("ENTRY_CHASE_LIMIT_PCT", "0.15"),
+        on_window_end=(env_str("ENTRY_ON_WINDOW_END", "ENTER") or "").upper(),
+        max_signal_age_seconds=env_int("MAX_SIGNAL_AGE_SECONDS", 300),
+        last_entry_time_et=env_time("LAST_ENTRY_TIME_ET", "15:45"),
+    )
+
+    approval = ApprovalSettings(
+        tolerance_abs=env_decimal("ENTRY_TOLERANCE_ABS", "0.10"),
+        tolerance_pct=env_decimal("ENTRY_TOLERANCE_PCT", None),
+        proposal_expiry_seconds=env_int("PROPOSAL_EXPIRY_SECONDS", 300),
+        require_in_range=env_bool("APPROVAL_REQUIRE_IN_RANGE", True),
+    )
+
+    # Fast mode caps legacy deployment settings without requiring variable edits.
+    tracking_poll = max(1, env_int("TRACKING_POLL_SECONDS", 1) or 1)
+    tracking_refresh = max(0, env_int("TRACKING_MESSAGE_REFRESH_SECONDS", 1) or 0)
+    if env_bool("TRACKING_FAST_MODE", True):
+        tracking_poll = min(tracking_poll, 1)
+        tracking_refresh = min(tracking_refresh, 1)  # zero still disables routine edits
+    tracking = TrackingSettings(
+        group_milestones=env_bool("MILESTONES_GROUPED", True),
+        poll_seconds=tracking_poll,
+        message_refresh_seconds=tracking_refresh,
+        milestone_step_pct=env_int("MILESTONE_STEP_PCT", 10) or 10,
+        success_premium_gain=env_decimal("SUCCESS_PREMIUM_GAIN", "0.50"),
+        stop_loss_pct=env_decimal("STOP_LOSS_PCT", "0.35"),
+        protected_stop_buffer=env_decimal("PROTECTED_STOP_BUFFER", "0.20"),
+        stop_time_et=env_time("TRACKING_STOP_TIME_ET", "16:00"),
+        highest_card_trigger=(env_str("HIGHEST_CARD_TRIGGER", "none") or "none").lower(),
+        pending_stale_seconds=max(300, env_int("EVENT_PENDING_STALE_SECONDS", 600) or 600),
+    )
+
+    market = MarketSettings(
+        open_et=env_time("MARKET_OPEN_ET", "09:30"),
+        close_et=env_time("MARKET_CLOSE_ET", "16:00"),
+        display_timezone=env_str("DISPLAY_TIMEZONE", "Asia/Riyadh"),
+    )
+
+    return Settings(
+        bot_token=_env("BOT_TOKEN"),
+        signal_chat_id=_env("SIGNAL_CHAT_ID"),
+        owner_user_id=parse_owner_user_id(_env("OWNER_USER_ID")),
+        uw_api_key=_env("UW_API_KEY"),
+        tv_webhook_secret=_env("TV_WEBHOOK_SECRET"),
+        database_url=_env("DATABASE_URL"),
+        port=env_int("PORT", 8080) or 8080,
+        webhook_path=env_str("WEBHOOK_PATH", "/webhook/tradingview"),
+        webhook_max_body_bytes=env_int("WEBHOOK_MAX_BODY_BYTES", 16384) or 16384,
+        notify_signal_status=env_bool("NOTIFY_SIGNAL_STATUS", True),
+        flags=flags,
+        uw=uw,
+        watch=watch,
+        match=match,
+        selection=selection,
+        entry=entry,
+        approval=approval,
+        tracking=tracking,
+        market=market,
+    )
 
 
-__all__ = ["setup_automation", "AutomationRuntime", "Decimal", "decision_footer", "utcnow"]
+def strategy_snapshot(settings: Settings) -> dict:
+    """Non-secret settings, stored with decisions for later analysis."""
+
+    def plain(obj) -> dict:
+        out = {}
+        for key, value in obj.__dict__.items():
+            if isinstance(value, (Decimal, time)):
+                out[key] = str(value)
+            elif isinstance(value, tuple):
+                out[key] = list(value)
+            else:
+                out[key] = value
+        return out
+
+    return {
+        "watch": plain(settings.watch),
+        "match": plain(settings.match),
+        "selection": plain(settings.selection),
+        "entry": plain(settings.entry),
+        "approval": plain(settings.approval),
+        "tracking": plain(settings.tracking),
+    }
