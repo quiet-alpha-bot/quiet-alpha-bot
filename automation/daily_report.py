@@ -81,7 +81,7 @@ def summarize_daily_trades(trades: Sequence, success_dollars: Decimal) -> dict:
         "net": total,
         "best_index": best_index,
         "results": results,
-        "stop_loss": sum(t["close_reason"] in {"STOP_LOSS_30", "STOP_LOSS_50"} for t in trades),
+        "stop_loss": sum(t["close_reason"] in {"STOP_LOSS_30", "STOP_LOSS_35", "STOP_LOSS_50"} for t in trades),
         "protected": sum(t["close_reason"] == "PROTECTED_STOP" for t in trades),
         "session_end": sum(t["close_reason"] == "SESSION_END" for t in trades),
     }
