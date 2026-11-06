@@ -179,9 +179,9 @@ class Tracker:
         if reason == "BREAKEVEN_EXIT":
             await self.send_breakeven_exit(closed)
             return closed
-        if reason in {"STOP_LOSS_30", "STOP_LOSS_50"} and self.s.flags.stop_loss_card:
+        if reason in {"STOP_LOSS_30", "STOP_LOSS_35", "STOP_LOSS_50"} and self.s.flags.stop_loss_card:
             await self.send_stop_loss_card(closed)
-        if closed.get('publication_chat_id') and reason not in {'STOP_LOSS_30','STOP_LOSS_50'}:
+        if closed.get('publication_chat_id') and reason not in {'STOP_LOSS_30','STOP_LOSS_35','STOP_LOSS_50'}:
             await self.send_public_exit(closed)
         if (
             self.s.flags.highest_card
