@@ -116,6 +116,7 @@ def daily_report_text(
     day: date,
     success_premium_gain: Decimal,
     preview: bool = False,
+    detail_limit: int | None = 30,
 ) -> tuple[str, dict]:
     trades = _included(trades)
     success_dollars = success_premium_gain * Decimal("100")
@@ -142,7 +143,7 @@ def daily_report_text(
     if trades:
         lines.extend(["", "<b>تفاصيل الصفقات</b>", "سعر الدخول → أعلى سعر مرصود"])
         for index, (trade, result) in enumerate(
-            zip(trades[:30], summary["results"][:30]), start=1
+            zip(trades[:detail_limit], summary["results"][:detail_limit]), start=1
         ):
             entry = Decimal(trade["approved_entry"])
             highest = trade["highest_bid"]
@@ -161,8 +162,8 @@ def daily_report_text(
             )
             if (trade.get("approval_quote") or {}).get("manual_exit_price"):
                 lines.append("سعر الإغلاق مُدخل يدويًا من الإدارة؛ احتُسب ضمن نتيجة الصفقة.")
-        if len(trades) > 30:
-            lines.append(f"… و{len(trades) - 30} صفقات أخرى")
+        if detail_limit is not None and len(trades) > detail_limit:
+            lines.append(f"… و{len(trades) - detail_limit} صفقات أخرى")
 
     if summary["missing_close_prices"]:
         lines.append(f"⚠️ {summary['missing_close_prices']} صفقة مغلقة بلا سعر إغلاق؛ خسائرها غير مكتملة.")
