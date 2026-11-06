@@ -1,6 +1,6 @@
 """Private-only continuation experiment; independent exact-contract momentum/flow.
 
-One five-minute search after a current +50% gain. Samples use distinct tape
+One five-minute search after a current +$100 per-contract gain. Samples use distinct tape
 observations 30..180 seconds apart, not repeated HTTP retrievals. Child trades
 cannot spawn children. Durable parent state and the normal direction lock
 prevent duplicate entries across restarts and concurrent manual approvals.
@@ -42,7 +42,7 @@ def parent_eligible(trade,now):
 def threshold(trade,quote,now):
     return (fresh_quote(quote,now) and quote.symbol==trade['option_symbol']
             and Decimal(trade['approved_entry'])>0
-            and quote.bid>=Decimal(trade['approved_entry'])*Decimal('1.5'))
+            and quote.bid>=Decimal(trade['approved_entry'])+Decimal('1.00'))
 
 
 def ordered_candidates(chain,parent,settings):
@@ -104,7 +104,7 @@ class PrivateContinuation:
                 await rt.publisher.text_once('continuation',ident,'PUBLISHED',
                     f"✅ نُشرت الصفقة الإضافية #{child['id']} تلقائيًا بالخاصة.\n"
                     f"الأصل #{ident} · <code>{escape(child['option_symbol'])}</code> · الدخول ${child['approved_entry']}\n"
-                    'تحقق +50٪ للأصل، وصعود رصدين حديثين للأصل والعقد الجديد، وتدفقات شراء متكررة وفارق سعر ضمن الشروط.')
+                    'تحقق +100 دولار للعقد الأصلي، وصعود رصدين حديثين للأصل والعقد الجديد، وتدفقات شراء متكررة وفارق سعر ضمن الشروط.')
             elif child.get('close_reason')=='OWNER_DELETED':
                 await rt.publisher.text_once('continuation',ident,'CANCELLED','أُلغيت الصفقة الإضافية بأمر الإدارة.')
             else:
@@ -199,7 +199,7 @@ class PrivateContinuation:
                 if await conn.fetchval(ACTIVE,quote.occ.right,quote.occ.strike,quote.occ.expiry):return None
                 if await conn.fetchval(q.OPEN_DIRECTION_STRIKE_EXISTS,quote.occ.right,quote.occ.strike):return None
                 key=f"private-continuation:{parent['id']}"
-                evidence=dict(continuation_origin=parent['id'],threshold_pct=50,indicator_signal_id=signal['id'],
+                evidence=dict(continuation_origin=parent['id'],threshold_dollars=100,indicator_signal_id=signal['id'],
                               parent_bid=str(original.bid),net_buy=str(flow.contracts[quote.symbol].net_buy),
                               flow_end=flow.end.isoformat(),spread=str(quote.spread))
                 sid=await conn.fetchval(q.INSERT_SIGNAL,key,'private_continuation',parent['direction'],
