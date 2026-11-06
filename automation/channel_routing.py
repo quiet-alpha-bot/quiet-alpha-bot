@@ -76,10 +76,10 @@ AND EXISTS (
     AND (copy.suffix='' OR kind<>'TRADE_EXIT' OR t.close_reason IN ('OWNER_EXIT','OWNER_EXIT_EXCLUDED','OWNER_EXIT_FLAT'))
     AND EXISTS (SELECT 1 FROM events entry WHERE entry.entity_type='trade' AND entry.entity_id=t.id
         AND entry.event_type='ENTRY_CARD'||copy.suffix AND entry.status='SENT')
-    AND ((kind='STOP_LOSS_CARD' AND t.close_reason IN ('STOP_LOSS_30','STOP_LOSS_50'))
+    AND ((kind='STOP_LOSS_CARD' AND t.close_reason IN ('STOP_LOSS_30','STOP_LOSS_35','STOP_LOSS_50'))
         OR (kind='BREAKEVEN_EXIT' AND t.close_reason='BREAKEVEN_EXIT')
         OR (kind='HIGHEST_CARD' AND t.success_detected_at IS NOT NULL AND t.close_reason<>'BREAKEVEN_EXIT')
-        OR (kind='TRADE_EXIT' AND t.close_reason NOT IN ('BREAKEVEN_EXIT','STOP_LOSS_30','STOP_LOSS_50')))
+        OR (kind='TRADE_EXIT' AND t.close_reason NOT IN ('BREAKEVEN_EXIT','STOP_LOSS_30','STOP_LOSS_35','STOP_LOSS_50')))
     AND NOT EXISTS (SELECT 1 FROM events e WHERE e.entity_type='trade' AND e.entity_id=t.id
                     AND e.event_type=kind||copy.suffix AND (e.status<>'FAILED' OR e.attempts>=3))
 ) ORDER BY t.closed_at LIMIT 50
