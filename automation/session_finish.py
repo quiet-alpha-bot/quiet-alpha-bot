@@ -143,11 +143,17 @@ class SessionFinish:
             if not await self.cards_sent([t for t in trades if t['id'] in ids],chat):continue
             revision=max(ids,default=0)
             greeting='FINISH_GREETING_'+str(chat)
-            await rt.publisher.text_once('daily',ident,greeting,CAPTION,chat_id=chat,level=revision)
-            state=await rt.db.fetchrow(q.EVENT_STATUS,'daily',ident,greeting,revision)
-            if not state or state['status']!='SENT':continue
             text,payload=daily_report_text(group,day,rt.settings.tracking.success_premium_gain)
             text += "\n\nيشمل صفقات اليوم حتى الآن؛ يُحدّث بعد إغلاق أي عقد جديد."
-            await rt.publisher.text_once('daily',ident,'DAILY_REPORT_'+str(chat),text,
-                                         payload=payload,chat_id=chat,level=revision)
+            # Friday's private experiment keeps daily -> closing -> weekly,
+            # including a manually finished session.
+            report='DAILY_REPORT_'+str(chat)
+            sequence=[(greeting,CAPTION,None),(report,text,payload)]
+            if day.weekday()==4 and chat==routing.PRIVATE_CHAT:
+                sequence.reverse()
+            for event,body,details in sequence:
+                await rt.publisher.text_once('daily',ident,event,body,
+                    payload=details,chat_id=chat,level=revision)
+                state=await rt.db.fetchrow(q.EVENT_STATUS,'daily',ident,event,revision)
+                if not state or state['status']!='SENT':break
         return True
