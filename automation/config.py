@@ -249,7 +249,7 @@ class TrackingSettings:
     milestone_step_pct: int
     # Approved rule: SUCCESS = approved_entry + $0.50 (+$50 gross/contract).
     success_premium_gain: Decimal
-    # Before SUCCESS: close at entry minus 50%.
+    # Before SUCCESS: close at entry minus 35%.
     stop_loss_pct: Decimal
     # After SUCCESS: protect capital at entry minus $0.20 premium.
     protected_stop_buffer: Decimal
@@ -428,7 +428,7 @@ def load_settings() -> Settings:
         message_refresh_seconds=tracking_refresh,
         milestone_step_pct=env_int("MILESTONE_STEP_PCT", 10) or 10,
         success_premium_gain=env_decimal("SUCCESS_PREMIUM_GAIN", "0.50"),
-        stop_loss_pct=env_decimal("STOP_LOSS_PCT", "0.50"),
+        stop_loss_pct=env_decimal("STOP_LOSS_PCT", "0.35"),
         protected_stop_buffer=env_decimal("PROTECTED_STOP_BUFFER", "0.20"),
         stop_time_et=env_time("TRACKING_STOP_TIME_ET", "16:00"),
         highest_card_trigger=(env_str("HIGHEST_CARD_TRIGGER", "none") or "none").lower(),
