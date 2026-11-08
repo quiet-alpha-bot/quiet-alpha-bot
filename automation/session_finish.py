@@ -87,10 +87,14 @@ class SessionFinish:
     async def cards_sent(self,trades,chat=None):
         for trade in trades:
             if trade.get('close_reason')=='OWNER_DELETED':continue
+            if chat == routing.PRIVATE_CHAT:
+                from .recovery import channel_view
+                trade=channel_view(trade,chat)
             if trade['status']=='TRACKING':return False
             reason=trade.get('close_reason')
             expected=['HIGHEST_CARD'] if is_hero(trade) else []
             if reason in ('OWNER_EXIT','OWNER_EXIT_EXCLUDED','OWNER_EXIT_FLAT'):expected.append('TRADE_EXIT')
+            if reason=='RECOVERY_STOP':expected.append('RECOVERY_STOP')
             if reason=='BREAKEVEN_EXIT':expected.append('BREAKEVEN_EXIT')
             elif reason in ('STOP_LOSS_30','STOP_LOSS_35','STOP_LOSS_50') and self.rt.settings.flags.stop_loss_card:
                 expected.append('STOP_LOSS_CARD')
@@ -132,6 +136,7 @@ class SessionFinish:
             if any(t['status']=='TRACKING' for t in group):continue
             pending=False
             for trade in tracking:
+                if chat==routing.PRIVATE_CHAT and trade.get('private_close'):continue
                 route=trade.get('publication_chat_id')
                 if route not in (chat,'both'):continue
                 suffix='_PRIVATE' if route=='both' and chat==routing.PRIVATE_CHAT else ''
