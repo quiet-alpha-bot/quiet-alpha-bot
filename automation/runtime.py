@@ -459,7 +459,8 @@ class AutomationRuntime:
                 lines.append(f"Contract support data: {self.contract_support.last_error}")
         lines.append(f"Opening prayer: {'enabled' if prayer_enabled() else 'disabled'} · 15m before NY open (16:15 summer / 17:15 winter Riyadh) · approval stays available")
         lines.append('Daily report: market close + 2m · waits for closed trades')
-        lines.append(f"Stop loss: {self.settings.tracking.stop_loss_pct * 100:g}% · before success · Hero excluded")
+        lines.append("Stop loss: public 50% · private 35% · independent channels · Hero excluded")
+        lines.append("Recovery: below entry then return · protection entry - $20/contract")
         lines.append("Private continuation: +$100 per contract · momentum + flow · private only · one child")
         lines.append("Weekly report: Friday · private only · after daily report and closing greeting")
         lines.append(f"Closing message: {'enabled' if closing_enabled() else 'disabled'} · after channel report · approval stays available")
@@ -472,7 +473,7 @@ class AutomationRuntime:
         if self.opening_prayer.last_error:
             lines.append(f"Opening prayer data: {self.opening_prayer.last_error}")
         if self.opportunities is not None:
-            lines.append(f"Reentry watch: {'enabled' if opportunity_enabled('REENTRY') else 'disabled'} · previous entry + configured tolerance · approval required")
+            lines.append(f"Reentry watch: {'enabled' if opportunity_enabled('REENTRY') else 'disabled'} · previous entry + configured tolerance · private only · approval required")
             lines.append(f"SPX unusual radar: {'enabled' if opportunity_enabled('SPX_RADAR') else 'disabled'} · 0DTE · $1M / 5m · >=3x · approval required")
             if self.opportunities.last_error:
                 lines.append(f"Opportunity data: {self.opportunities.last_error}")
