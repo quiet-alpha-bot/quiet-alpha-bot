@@ -10,6 +10,7 @@ import os
 from datetime import timedelta
 from decimal import Decimal
 
+from .radar_publication import keyboard as publication_keyboard
 from . import queries as q
 from .company_radar import (CompanyRadar, DataIssue, LATEST, INSERT, company_text,
                             data_rows, number, MIN_PREMIUM)
@@ -35,18 +36,43 @@ INSERT_TRIGGER = '''INSERT INTO autonomous_triggers
 (event_key,kind,option_symbol,origin_trade_id,alert_id,reference_entry,created_at,expires_at)
 VALUES($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT(event_key) DO NOTHING RETURNING id'''
 LINK_TRIGGER = 'UPDATE autonomous_triggers SET signal_db_id=$2 WHERE id=$1'
-REENTRY_TRADES = '''SELECT DISTINCT ON(t.option_symbol) t.* FROM trades t
-WHERE t.status='CLOSED' AND t.close_reason IN ('PROTECTED_STOP','OWNER_EXIT') AND t.expiry=$1
-AND closed_at >= $2 AND success_detected_at IS NOT NULL
-AND highest_bid >= approved_entry+$3 AND current_bid < highest_bid
-AND NOT EXISTS(SELECT 1 FROM trades newer WHERE newer.option_symbol=t.option_symbol
-               AND newer.approval_time>t.closed_at)
-ORDER BY t.option_symbol, t.closed_at DESC, t.id DESC LIMIT 60'''
+REENTRY_TRADES = """SELECT DISTINCT ON(t.option_symbol) t.* FROM trades t
+WHERE t.expiry=$1 AND t.close_reason IS DISTINCT FROM 'OWNER_DELETED'
+AND (
+ (t.status='CLOSED' AND t.closed_at >= $2 AND (
+   (t.close_reason IN ('PROTECTED_STOP','OWNER_EXIT') AND t.success_detected_at IS NOT NULL
+       AND t.highest_bid>=t.approved_entry+$3)
+   OR (t.close_reason IN ('STOP_LOSS_35','RECOVERY_STOP') AND t.publication_chat_id='-1004417588627')))
+ OR (t.private_close IS NOT NULL AND (t.private_close->>'closed_at')::timestamptz >= $2))
+AND NOT EXISTS (SELECT 1 FROM trades newer WHERE newer.option_symbol=t.option_symbol
+ AND newer.id<>t.id AND newer.publication_chat_id IN ('-1004417588627','both')
+ AND newer.approval_time>COALESCE((t.private_close->>'closed_at')::timestamptz,t.closed_at))
+ORDER BY t.option_symbol,COALESCE((t.private_close->>'closed_at')::timestamptz,t.closed_at) DESC,t.id DESC LIMIT 60"""
+PRIVATE_ACTIVE_FILTER = "(publication_chat_id IS DISTINCT FROM '-1004349914430' AND (publication_chat_id IS DISTINCT FROM 'both' OR private_close IS NULL))"
+PRIVATE_STRIKES = "SELECT DISTINCT strike FROM trades WHERE status='TRACKING' AND direction=$1 AND " + PRIVATE_ACTIVE_FILTER
+PRIVATE_STRIKE_EXISTS = "SELECT EXISTS(SELECT 1 FROM trades WHERE status='TRACKING' AND direction=$1 AND strike=$2 AND " + PRIVATE_ACTIVE_FILTER + ")"
+
+def is_reentry(row):
+    return bool(row and row.get('source') == 'autonomous' and row.get('event_type') == 'REENTRY')
+
+def reentry_view(trade):
+    from .recovery import channel_view
+    from .channel_routing import PRIVATE_CHAT
+    if not trade or trade.get('close_reason')=='OWNER_DELETED':return None
+    view=channel_view(trade,PRIVATE_CHAT)
+    if view.get('status')!='CLOSED':return None
+    reason=view.get('close_reason')
+    if reason in ('PROTECTED_STOP','OWNER_EXIT') and view.get('success_detected_at') is not None:return view
+    if reason in ('STOP_LOSS_35','RECOVERY_STOP') and (trade.get('private_close') or trade.get('publication_chat_id')==PRIVATE_CHAT):return view
+    return None
+
 ACTIVE = '''SELECT EXISTS(SELECT 1 FROM trades WHERE status='TRACKING'
 AND direction=$1 AND strike=$2 AND expiry=$3)
 OR EXISTS(SELECT 1 FROM proposals WHERE direction=$1 AND strike=$2 AND expiry=$3
 AND status IN ('PENDING_APPROVAL','NEEDS_RECONFIRM','APPROVING')
 AND (expires_at IS NULL OR expires_at>now()))'''
+PRIVATE_ACTIVE = ACTIVE.replace("AND direction=$1 AND strike=$2 AND expiry=$3)",
+    "AND direction=$1 AND strike=$2 AND expiry=$3 AND " + PRIVATE_ACTIVE_FILTER + ")",1)
 RECENT_ALERTS = '''SELECT * FROM spx_radar_alerts WHERE window_end >= $1
 AND market_date=$2 ORDER BY id DESC LIMIT 60'''
 
@@ -140,7 +166,8 @@ class SPXRadar(CompanyRadar):
 
     async def send(self,row):
         await self.publisher.text_once('spx_radar',row['id'],'SPX_UNUSUAL_FLOW',
-                                      row['message_text'],payload=row['payload'],max_attempts=3)
+                                      row['message_text'],payload=row['payload'],max_attempts=3,
+                                      reply_markup=publication_keyboard('spx',row['id']))
 
 
 class AutonomousOpportunities:
@@ -183,11 +210,11 @@ class AutonomousOpportunities:
         await self.sample(quote,now)
         return quote if valid else None
 
-    async def qualified(self,quote):
+    async def qualified(self,quote,private=False):
         now=utcnow(); occ=quote.occ
         if occ is None or occ.expiry!=et_date(now) or occ.root!=self.s.uw.contract_root:
             return None
-        if await self.db.fetchval(ACTIVE,occ.right,occ.strike,occ.expiry):
+        if await self.db.fetchval(PRIVATE_ACTIVE if private else ACTIVE,occ.right,occ.strike,occ.expiry):
             return None
         snapshot=await self.flow(quote.symbol,now)
         if snapshot is None:
@@ -205,11 +232,13 @@ class AutonomousOpportunities:
             trades=await self.db.fetch(REENTRY_TRADES,et_date(now),
                 et_datetime(et_date(now),self.s.market.open_et),self.s.tracking.success_premium_gain)
             for trade in trades:
+                trade=reentry_view(trade)
+                if trade is None:continue
                 quote=await self.quote_and_momentum(trade['option_symbol'],trade['closed_at'])
                 if (quote is None
                     or not recovery_price(trade['approved_entry'],quote.ask,self.s.approval)):
                     continue
-                if await self.qualified(quote) is not None:
+                if await self.qualified(quote,private=True) is not None:
                     await self.emit('REENTRY',f"reentry:{trade['id']}",quote,
                                     trade_id=trade['id'],entry=trade['approved_entry'])
         if enabled('SPX_RADAR'):
@@ -267,7 +296,8 @@ class AutonomousOpportunities:
                 # Serialize both radar and reentry proposals for the same direction/strike.
                 await conn.execute('SELECT pg_advisory_xact_lock(hashtext($1))',
                                    f'autonomous:{quote.occ.right}:{quote.occ.strike}')
-                if await conn.fetchval(ACTIVE,quote.occ.right,quote.occ.strike,quote.occ.expiry):
+                await conn.execute(q.LOCK_TRADE_DIRECTION,quote.occ.right)
+                if await conn.fetchval(PRIVATE_ACTIVE if kind=='REENTRY' else ACTIVE,quote.occ.right,quote.occ.strike,quote.occ.expiry):
                     return
                 busy=await conn.fetchval('''SELECT 1 FROM autonomous_triggers WHERE option_symbol=$1
                     AND expires_at>$2 AND signal_db_id IS NOT NULL LIMIT 1''',quote.symbol,now)
@@ -304,9 +334,8 @@ class AutonomousOpportunities:
             return None
         after=None
         if trigger['kind']=='REENTRY':
-            trade=await self.db.fetchrow(q.GET_TRADE,trigger['origin_trade_id'])
-            if (trade is None or trade['status']!='CLOSED' or trade['close_reason'] not in ('PROTECTED_STOP','OWNER_EXIT')
-                or trade['success_detected_at'] is None):
+            trade=reentry_view(await self.db.fetchrow(q.GET_TRADE,trigger['origin_trade_id']))
+            if trade is None:
                 return None
             after=trade['closed_at']
         quote=await self.quote_and_momentum(trigger['option_symbol'],after)
