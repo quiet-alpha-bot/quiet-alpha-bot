@@ -6,7 +6,7 @@ PUBLIC_CHAT = '-1004349914430'
 PRIVATE_CHAT = '-1004417588627'
 BOTH_CHATS = 'both'
 PUBLIC_EVENTS = frozenset({'ENTRY_CARD','MILESTONE','SUCCESS_CARD','HIGHEST_CARD',
-                          'STOP_LOSS_CARD','BREAKEVEN_APPROACH','BREAKEVEN_EXIT'})
+                          'STOP_LOSS_CARD','BREAKEVEN_APPROACH','BREAKEVEN_EXIT','RECOVERY_RETURN','RECOVERY_STOP'})
 # TRADE_EXIT is administrative: protection still closes tracking, while the
 # publication channel receives its result card without the generic exit text.
 
@@ -72,7 +72,7 @@ AND EXISTS (SELECT 1 FROM events e WHERE e.entity_type='trade' AND e.entity_id=t
 AND EXISTS (
     SELECT 1 FROM (VALUES ('TRADE_EXIT'),('STOP_LOSS_CARD'),('HIGHEST_CARD'),('BREAKEVEN_EXIT')) AS needed(kind)
     CROSS JOIN (VALUES (''),('_PRIVATE')) AS copy(suffix)
-    WHERE (copy.suffix='' OR t.publication_chat_id='both')
+    WHERE (copy.suffix='' OR (t.publication_chat_id='both' AND t.private_close IS NULL))
     AND (copy.suffix='' OR kind<>'TRADE_EXIT' OR t.close_reason IN ('OWNER_EXIT','OWNER_EXIT_EXCLUDED','OWNER_EXIT_FLAT'))
     AND EXISTS (SELECT 1 FROM events entry WHERE entry.entity_type='trade' AND entry.entity_id=t.id
         AND entry.event_type='ENTRY_CARD'||copy.suffix AND entry.status='SENT')
@@ -90,12 +90,14 @@ def report_groups(trades):
     """Each actually published copy belongs to its channel; admin retains one trade."""
     groups = {}
     for trade in trades:
+        if trade.get('close_reason')=='OWNER_DELETED':continue
         chat = trade.get('publication_chat_id')
         if chat == BOTH_CHATS:
             for target,mid,timestamp in [(PUBLIC_CHAT,'entry_message_id','published_at'),
                                          (PRIVATE_CHAT,'private_entry_message_id','private_published_at')]:
                 if trade.get(mid) is not None:
-                    copy=dict(trade,publication_chat_id=target,entry_message_id=trade[mid],
+                    from .recovery import channel_view
+                    copy=dict(channel_view(trade,target),publication_chat_id=target,entry_message_id=trade[mid],
                               published_at=trade.get(timestamp))
                     groups.setdefault(target,[]).append(copy)
         elif chat and trade.get('entry_message_id') is not None:
