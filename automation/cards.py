@@ -146,6 +146,9 @@ class Publisher:
                 trade = await conn.fetchrow(q.GET_TRADE, entity_id)
                 if trade and trade.get('close_reason') == DELETED_REASON:
                     return None
+                if (trade and trade.get('private_close') and str((payload or {}).get('publication_chat_id')) == PRIVATE_CHAT
+                    and not (event_type == 'STOP_LOSS_CARD_PRIVATE' and (payload or {}).get('private_snapshot'))):
+                    return None
                 ledger = self.db
                 if conn is not self.db:
                     ledger = Database('')
@@ -207,8 +210,10 @@ class Publisher:
         targets = (PUBLIC_CHAT,PRIVATE_CHAT) if route == BOTH_CHATS else (route,)
         result = None
         for target in targets:
-            event = event_for_channel(event_type,target,route)
-            entry_event = event_for_channel('ENTRY_CARD',target,route)
+            trade = await self.db.fetchrow(q.GET_TRADE,entity_id) if entity_type == 'trade' else None
+            ledger_route = (trade or {}).get('publication_chat_id') or route
+            event = event_for_channel(event_type,target,ledger_route)
+            entry_event = event_for_channel('ENTRY_CARD',target,ledger_route)
             if not await self.publication_ready(entity_type,entity_id,event_type,target,entry_event):
                 continue
             reply = await self.entry_reply(entity_type,entity_id,event_type,target,entry_event)
@@ -230,13 +235,16 @@ class Publisher:
         payload: Optional[dict] = None,
         max_attempts: int = 3,
         caption: Optional[str] = None,
+        chat_id: Optional[str] = None,
     ) -> Optional[int]:
-        route = await trade_destination(self.db,entity_type,entity_id,event_type,self.chat_id)
+        route = chat_id or await trade_destination(self.db,entity_type,entity_id,event_type,self.chat_id)
         targets = (PUBLIC_CHAT,PRIVATE_CHAT) if route == BOTH_CHATS else (route,)
         result = None
         for target in targets:
-            event = event_for_channel(event_type,target,route)
-            entry_event = event_for_channel('ENTRY_CARD',target,route)
+            trade = await self.db.fetchrow(q.GET_TRADE,entity_id) if entity_type == 'trade' else None
+            ledger_route = (trade or {}).get('publication_chat_id') or route
+            event = event_for_channel(event_type,target,ledger_route)
+            entry_event = event_for_channel('ENTRY_CARD',target,ledger_route)
             if not await self.publication_ready(entity_type,entity_id,event_type,target,entry_event):
                 continue
             reply = await self.entry_reply(entity_type,entity_id,event_type,target,entry_event)
