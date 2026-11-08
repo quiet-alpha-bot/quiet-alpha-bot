@@ -86,7 +86,7 @@ class ApprovalHandler:
                     await query.answer('انتهت مهلة إعادة النظر أو تمت معالجة الطلب.',show_alert=True)
                     return
                 await query.answer('عاد المقترح للمراجعة؛ لم تُفتح صفقة.')
-                await query.edit_message_reply_markup(reply_markup=proposal_keyboard(proposal_id))
+                await query.edit_message_reply_markup(reply_markup=proposal_keyboard(proposal_id,row.get('publication_chat_id')))
             elif action in (CB_PUBLIC, CB_PRIVATE, CB_BOTH):
                 if not routing.enabled():
                     await query.answer('اختيار القنوات غير مفعّل.',show_alert=True)
@@ -160,6 +160,14 @@ class ApprovalHandler:
         if (existing.get('details') or {}).get('reconsidered') and not within_session(utcnow(),s.market.open_et,s.market.close_et):
             await query.answer('إعادة اعتماد الفرص التلقائية متاحة أثناء جلسة السوق فقط.',show_alert=True)
             return
+        from .autonomous import is_reentry
+        origin_signal=(await rt.db.fetchrow(q.GET_SIGNAL,existing['signal_db_id'])
+                       if (existing.get('details') or {}).get('event_type') == 'REENTRY' else None)
+        if is_reentry(origin_signal):
+            if publication_chat_id not in (None,routing.PRIVATE_CHAT):
+                await query.answer('إعادة الدخول تجريبية بالخاصة فقط.',show_alert=True)
+                return
+            publication_chat_id=routing.PRIVATE_CHAT
         chosen = publication_chat_id or existing.get('publication_chat_id')
         if routing.enabled() and chosen is None:
             await query.answer('هذا الاقتراح قديم؛ يلزم اختيار قناة نشر في اقتراح جديد.',show_alert=True)
@@ -290,6 +298,12 @@ class ApprovalHandler:
                           user_id: int) -> None:
         rt = self.rt
         signal = await rt.db.fetchrow(q.GET_SIGNAL, proposal["signal_db_id"])
+        from .autonomous import is_reentry, PRIVATE_STRIKE_EXISTS, GET_TRIGGER, reentry_view
+        private_reentry=is_reentry(signal)
+        if private_reentry and proposal.get('publication_chat_id') != routing.PRIVATE_CHAT:
+            await rt.db.execute(q.REVERT_APPROVAL,proposal['id'])
+            return
+        trigger=await rt.db.fetchrow(GET_TRIGGER,signal['id']) if private_reentry else None
         now = utcnow()
         trade = None
         limit_hit = False
@@ -299,12 +313,22 @@ class ApprovalHandler:
         async with rt.db.pool.acquire() as conn:
             async with conn.transaction():
                 await conn.execute(q.LOCK_TRADE_DIRECTION, proposal["direction"])
+                if private_reentry:
+                    if not trigger or not trigger['created_at'] <= now < trigger['expires_at']:
+                        await conn.execute(q.REVERT_APPROVAL,proposal['id'])
+                        return
+                    await conn.execute('SELECT pg_advisory_xact_lock($1::bigint)',
+                                       -7000000000000000000+trigger['origin_trade_id'])
+                    origin=await conn.fetchrow(q.GET_TRADE+' FOR UPDATE',trigger['origin_trade_id'])
+                    if reentry_view(origin) is None:
+                        await conn.execute(q.REVERT_APPROVAL,proposal['id'])
+                        return
                 session_finished = await stopped(conn)
                 active_count = await conn.fetchval(
                     q.COUNT_TRACKING_DIRECTION, proposal["direction"]
                 )
                 strike_busy = await conn.fetchval(
-                    q.OPEN_DIRECTION_STRIKE_EXISTS,
+                    PRIVATE_STRIKE_EXISTS if private_reentry else q.OPEN_DIRECTION_STRIKE_EXISTS,
                     proposal["direction"], proposal["strike"],
                 )
                 if session_finished:
