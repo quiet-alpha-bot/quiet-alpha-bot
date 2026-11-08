@@ -28,6 +28,9 @@ from decimal import Decimal
 from typing import Optional
 
 from . import queries as q
+from . import recovery
+from .channel_routing import PRIVATE_CHAT, BOTH_CHATS
+from .delete_trade import delivery_guard
 from .hero import is_hero, CAPTION as HERO_CAPTION, end_caption as hero_end_caption, end_card as hero_end_card, MANUAL_BLOCK
 from .cards import CardRenderers, Publisher
 from .config import Settings
@@ -176,6 +179,9 @@ class Tracker:
         if is_hero(closed):
             await self.send_highest_card(closed)
             return closed
+        if reason == "RECOVERY_STOP":
+            await self.send_recovery_close(closed)
+            return closed
         if reason == "BREAKEVEN_EXIT":
             await self.send_breakeven_exit(closed)
             return closed
@@ -189,6 +195,28 @@ class Tracker:
         ):
             await self.send_highest_card(closed)
         return closed
+
+    async def send_recovery_close(self, trade):
+        return await self.publisher.text_once('trade',trade['id'],'RECOVERY_STOP',
+            recovery.close_text(trade), max_attempts=ORDERED_EVENT_MAX_ATTEMPTS)
+
+    async def send_recovery_return(self, trade):
+        return await self.publisher.text_once('trade',trade['id'],'RECOVERY_RETURN',
+            recovery.recovered_text(trade), max_attempts=ORDERED_EVENT_MAX_ATTEMPTS)
+
+    async def freeze_private(self, trade, now):
+        # Serialize against /D and in-flight channel publications.
+        async with delivery_guard(self.db, trade['id']) as conn:
+            fresh = await conn.fetchrow(q.GET_TRADE, trade['id'])
+            if not fresh or fresh['status'] != 'TRACKING':return
+            await conn.fetchrow(recovery.FREEZE_PRIVATE,trade['id'],recovery.snapshot(fresh,now))
+        fresh = await self.db.fetchrow(q.GET_TRADE,trade['id'])
+        if fresh and recovery.private_closed(fresh):
+            await self.send_private_stop(fresh)
+
+    async def send_private_stop(self, trade):
+        if self.s.flags.stop_loss_card:
+            await self.send_stop_loss_card(recovery.channel_view(trade,PRIVATE_CHAT),private_snapshot=True)
 
     async def send_public_exit(self, trade):
         if is_hero(trade):return await self.send_highest_card(trade)
@@ -246,7 +274,7 @@ class Tracker:
             f"السعر الحالي: <b>${bid:.2f}</b>\n"
             f"المتبقي للوصول إلى سعر الدخول: <b>{remaining:.2f}%</b>\n\n"
             f"تعافى العقد بعد تراجع بلغ <b>{drawdown:.2f}%</b>، "
-            "واقترب من سعر الدخول. استعدوا للخروج عند العودة إلى رأس المال."
+            "اقترب العقد من سعر الدخول؛ فرصة لمراجعة قرارك بهدوء."
         )
         return await self.publisher.text_once(
             "trade", trade["id"], "BREAKEVEN_APPROACH", text, level=level,
@@ -283,7 +311,7 @@ class Tracker:
                      if (trade.get("approval_quote") or {}).get("manual_exit_price") else None),
         )
 
-    async def send_stop_loss_card(self, trade) -> Optional[int]:
+    async def send_stop_loss_card(self, trade, private_snapshot=False) -> Optional[int]:
         """Configured stop-loss card. Sent once and only before SUCCESS."""
         entry = Decimal(trade["approved_entry"])
         return await self.publisher.photo_once(
@@ -294,8 +322,10 @@ class Tracker:
             payload={
                 "entry": str(entry),
                 "observed_bid": str(trade["current_bid"]),
-                "stop_loss_pct": str(self.s.tracking.stop_loss_pct),
+                "stop_loss_pct": str(Decimal(".35") if private_snapshot else recovery.stop_pct(trade,self.s.tracking.stop_loss_pct)),
+                "private_snapshot": private_snapshot,
             },
+            chat_id=PRIVATE_CHAT if private_snapshot else None,
         )
 
     async def _event_done(self, trade_id: int, event_type: str, level: int) -> bool:
@@ -313,7 +343,7 @@ class Tracker:
             return False
         if row["status"] == "SENT":
             trade = await self.db.fetchrow(q.GET_TRADE, trade_id)
-            if trade and trade.get('publication_chat_id') == 'both':
+            if trade and trade.get('publication_chat_id') == 'both' and not recovery.private_closed(trade):
                 other = await self.db.fetchrow(q.EVENT_STATUS,"trade",trade_id,event_type+'_PRIVATE',level)
                 return bool(other and other['status']=='SENT')
             return True
@@ -330,7 +360,7 @@ class Tracker:
         wait for their own delivery. Success cards retain strict SENT checks.
         """
         trade = await self.db.fetchrow(q.GET_TRADE, trade_id)
-        events = ('MILESTONE', 'MILESTONE_PRIVATE') if trade and trade.get('publication_chat_id') == 'both' else ('MILESTONE',)
+        events = ('MILESTONE', 'MILESTONE_PRIVATE') if trade and trade.get('publication_chat_id') == 'both' and not recovery.private_closed(trade) else ('MILESTONE',)
         for event in events:
             row = await self.db.fetchrow(q.EVENT_STATUS, 'trade', trade_id, event, level)
             if not row or row['status'] not in ('SENT', 'UNCERTAIN'):
@@ -421,6 +451,8 @@ class Tracker:
                 await self.publisher.photo_once(
                     "trade", trade_id, "SUCCESS_CARD",
                     lambda: self.renderers.success_card(entry, event.threshold, trade["option_symbol"]),
+                    caption=("🦋 تعافى العقد وحقق الهدف ✅\nعاد إلى سعر الدخول، ثم واصل صعوده ليحقق هدف +50$ للعقد."
+                             if trade.get("recovered_at") else None),
                     payload={"observed_bid": str(bid), "threshold": str(event.threshold)},
                     max_attempts=ORDERED_EVENT_MAX_ATTEMPTS,
                 )
@@ -497,6 +529,12 @@ class Tracker:
         if self.s.flags.breakeven_exit:
             for closed in await self.db.fetch(q.UNSENT_BREAKEVEN_EXITS):
                 await self.send_breakeven_exit(closed)
+        for frozen in await self.db.fetch(recovery.PENDING_PRIVATE):
+            await self.send_private_stop(frozen)
+        for closed in await self.db.fetch(recovery.PENDING_RECOVERY):
+            await self.send_recovery_close(closed)
+        for recovered in await self.db.fetch(recovery.PENDING_RETURN):
+            await self.send_recovery_return(recovered)
         trades = await self.db.fetch(q.TRACKING_TRADES)
         self.last_tick_at = utcnow()
         if not trades:
@@ -544,7 +582,7 @@ class Tracker:
     async def _process(self, trade, quote, latency: Optional[int]) -> None:
         trade_id = trade["id"]
         latest = await self.db.fetchrow(q.GET_TRADE, trade_id)
-        if latest and latest.get('close_reason') == 'OWNER_DELETED':
+        if latest and (latest.get('close_reason') == 'OWNER_DELETED' or latest.get('status') != 'TRACKING'):
             return
         now = utcnow()
         if quote is None:
@@ -606,6 +644,12 @@ class Tracker:
                 significant = True
 
         gain = self.s.tracking.success_premium_gain
+        if (not is_hero(trade) and self.s.flags.breakeven_exit
+            and trade.get('recovered_at') is None and trade['success_detected_at'] is None
+            and trade.get('lowest_bid') is not None and trade['lowest_bid'] < entry
+            and quote.bid is not None and quote.bid >= entry):
+            armed = await self.db.fetchrow(recovery.ARM,trade_id,now)
+            if armed:await self.send_recovery_return(armed)
         # SUCCESS is detected only while SUCCESS_CARD_ENABLED is on, from the
         # current observation only (no backfill from earlier prices).
         if (
@@ -627,21 +671,18 @@ class Tracker:
         latest_trade = await self.db.fetchrow(q.GET_TRADE, trade_id)
         if quote.bid is not None and latest_trade is not None and not is_hero(latest_trade):
             success_achieved = latest_trade["success_detected_at"] is not None
-            if (self.s.flags.breakeven_exit and not success_achieved
-                and quote.last_tape_time is not None
-                and 0 <= (now - quote.last_tape_time).total_seconds() <= 120
-                and breakeven_ready(entry, quote.bid, state.lowest_bid,
-                                    state.highest_bid, gain,
-                                    self.s.tracking.breakeven_drawdown_pct)):
-                await self.close(trade_id, "BREAKEVEN_EXIT")
-                return
             if not success_achieved:
-                stop = hard_stop_price(entry, self.s.tracking.stop_loss_pct)
-                if quote.bid <= stop:
-                    await self.close(
-                        trade_id,
-                        f"STOP_LOSS_{int(self.s.tracking.stop_loss_pct * 100)}",
-                    )
+                if (latest_trade.get('recovered_at') is not None
+                    and quote.bid <= protected_stop_price(entry,Decimal('.20'))):
+                    await self.close(trade_id,'RECOVERY_STOP')
+                    return
+                if (latest_trade.get('publication_chat_id') == BOTH_CHATS
+                    and not recovery.private_closed(latest_trade)
+                    and quote.bid <= hard_stop_price(entry,Decimal('.35'))):
+                    await self.freeze_private(latest_trade,now)
+                pct = recovery.stop_pct(latest_trade,self.s.tracking.stop_loss_pct)
+                if quote.bid <= hard_stop_price(entry,pct):
+                    await self.close(trade_id,f'STOP_LOSS_{int(pct*100)}')
                     return
             else:
                 stop = protected_stop_price(
@@ -660,7 +701,7 @@ class Tracker:
             and 0 <= (now - quote.last_tape_time).total_seconds() <= 120
             and breakeven_approach_ready(entry, quote.bid, state.lowest_bid,
                                         state.highest_bid, gain,
-                                        self.s.tracking.breakeven_drawdown_pct)):
+                                        Decimal("0")) and quote.bid > state.lowest_bid):
             await self.send_breakeven_approach(latest_trade)
 
         # ---- live tracking message ----------------------------------
