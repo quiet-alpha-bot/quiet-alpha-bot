@@ -39,7 +39,7 @@ def _included(trades):
 def _result(trade, success_dollars):
     peak = _peak_result(trade)
     reason = trade.get("close_reason")
-    if reason in {"BREAKEVEN_EXIT", "OWNER_EXIT_FLAT"} or (reason == "OWNER_EXIT" and peak < success_dollars):
+    if reason in {"BREAKEVEN_EXIT", "OWNER_EXIT_FLAT", "RECOVERY_STOP"} or (reason == "OWNER_EXIT" and peak < success_dollars):
         if trade["current_bid"] is not None:
             return (Decimal(trade["current_bid"]) - Decimal(trade["approved_entry"])) * 100
     return peak
@@ -149,6 +149,7 @@ def daily_report_text(
             highest = trade["highest_bid"]
             flat = trade["close_reason"] in {"BREAKEVEN_EXIT", "OWNER_EXIT_FLAT"}
             manual_loss = trade["close_reason"] == "OWNER_EXIT" and _peak_result(trade) < success_dollars
+            recovery_loss = trade["close_reason"] == "RECOVERY_STOP"
             won = result >= success_dollars and not flat
             label = (
                 f"{strike_text(Decimal(trade['strike']))} {trade['direction']}"
@@ -158,6 +159,7 @@ def daily_report_text(
                 f"{index}. {'⚖️' if flat else ('✅' if won else '❌')} <code>{escape(label)} | "
                 f"{money(entry)} → {money(trade['current_bid']) if flat or manual_loss else (money(highest) if highest is not None else '—')} "
                 f"| {_signed_usd(result)}</code>"
+                + (" — إغلاق لحماية رأس المال؛ النتيجة بسعر الإغلاق المرصود" if recovery_loss else "")
                 + (" — خروج على رأس المال" if flat else (" — إيقاف بقرار الإدارة؛ السعر المعروض سعر الإغلاق" if manual_loss else ""))
             )
             if (trade.get("approval_quote") or {}).get("manual_exit_price"):
