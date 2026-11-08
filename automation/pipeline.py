@@ -279,7 +279,7 @@ class SignalPipeline:
         if self.s.selection.weight_distance > 0:
             spot = await self.uw.spot(self.s.uw.spot_ticker)
 
-        blocked_strikes = await self._open_strikes(direction)
+        blocked_strikes = await self._open_strikes(direction, row)
         excluded = set(self._signal_payload(row).get("excluded_symbols", []))
         quotes = [quote for quote in quotes if quote.symbol not in excluded]
         if requires_flow:
@@ -330,7 +330,7 @@ class SignalPipeline:
                                        ticker, expiry, spot, [], None, meta)
                 return
             ticker, fresh_quotes, meta = await self.uw.chain(direction, expiry)
-            blocked_strikes = await self._open_strikes(direction)
+            blocked_strikes = await self._open_strikes(direction, row)
             selection = select_with_flow(
                 [qt for qt in fresh_quotes if qt.symbol not in excluded], direction, expiry,
                 self.s.uw.contract_root, self.s.selection, utcnow(), snapshot, spot,
@@ -344,7 +344,7 @@ class SignalPipeline:
                 return
             chosen = selection.selected.quote
 
-        if chosen.occ.strike in await self._open_strikes(direction):
+        if chosen.occ.strike in await self._open_strikes(direction, row):
             await self._finish_run(run_id, "SKIPPED", "STRIKE_ALREADY_OPEN", ticker,
                                    expiry, spot, selection.candidates, chosen.symbol, meta)
             await self._finish(row, SignalStatus.SKIPPED, "STRIKE_ALREADY_OPEN")
@@ -380,7 +380,7 @@ class SignalPipeline:
             if attempts or self._signal_payload(row).get("alternative_count"):
                 reasons.insert(0, "استرايك بديل بعد خروج سعر العقد السابق عن نطاق الطرح")
         if row.get("source") == "autonomous":
-            reasons.insert(0, "عودة السعر والزخم والسيولة بعد إغلاق صفقة ناجحة" if row["event_type"] == "REENTRY"
+            reasons.insert(0, "عودة السعر والزخم والسيولة بعد إغلاق المتابعة — تجربة بالخاصة" if row["event_type"] == "REENTRY"
                            else "رادار عقود اليوم؛ العقد المرشح اجتاز فحص السيولة والزخم الخاص به")
         live_confirmation = None
         if requires_flow:
@@ -441,6 +441,10 @@ class SignalPipeline:
             return  # proposal already exists for this signal
 
         channel = self._signal_payload(row).get("publication_chat_id") if self._signal_payload(row).get("alternative_count") else None
+        from .autonomous import is_reentry
+        if is_reentry(row):
+            from .channel_routing import PRIVATE_CHAT
+            channel=PRIVATE_CHAT
         if channel:
             from .channel_routing import PUBLIC_CHAT, PRIVATE_CHAT, BOTH_CHATS
             if channel not in (PUBLIC_CHAT, PRIVATE_CHAT, BOTH_CHATS):
@@ -639,8 +643,9 @@ class SignalPipeline:
         )
         return final, latest_quote, highest_bid
 
-    async def _open_strikes(self, direction):
-        rows = await self.db.fetch(q.OPEN_DIRECTION_STRIKES, direction.value)
+    async def _open_strikes(self, direction, signal=None):
+        from .autonomous import is_reentry, PRIVATE_STRIKES
+        rows = await self.db.fetch(PRIVATE_STRIKES if is_reentry(signal) else q.OPEN_DIRECTION_STRIKES, direction.value)
         return {Decimal(str(row["strike"])) for row in rows}
 
     async def _store_candidates(self, run_id: int, candidates) -> None:
