@@ -36,7 +36,7 @@ def parent_eligible(trade,now):
     return (trade is not None and trade['status']=='TRACKING' and not is_hero(trade)
             and not (trade.get('approval_quote') or {}).get('continuation_origin')
             and trade['expiry']==et_date(now)
-            and trade.get('publication_chat_id') in (routing.PRIVATE_CHAT,routing.BOTH_CHATS))
+            and trade.get('publication_chat_id') in (routing.PUBLIC_CHAT,routing.PRIVATE_CHAT,routing.BOTH_CHATS))
 
 
 def threshold(trade,quote,now):
@@ -124,7 +124,7 @@ class PrivateContinuation:
         if not in_session:return
         for parent in await rt.db.fetch(q.TRACKING_TRADES):
             if not parent_eligible(parent,utcnow()):continue
-            event=routing.event_for_channel('ENTRY_CARD',routing.PRIVATE_CHAT,parent['publication_chat_id'])
+            event='ENTRY_CARD'  # Any published origin is eligible; child destination remains private.
             state=await rt.db.fetchrow(q.EVENT_STATUS,'trade',parent['id'],event,0)
             if not state or state['status']!='SENT':continue
             row=await rt.db.fetchrow(GET,parent['id'])
