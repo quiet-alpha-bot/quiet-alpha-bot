@@ -8,6 +8,7 @@ from html import escape
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
+from .recovery import stop_pct as channel_stop_pct
 from . import queries as q
 from . import reconsideration
 from .hero import MODE, LABEL, CAPTION, is_hero
@@ -211,7 +212,7 @@ class ManualTracking:
         entry = min(entry, quote.ask) if quote is not None else entry
         if not rt.settings.selection.premium_min <= entry <= rt.settings.selection.premium_max:
             raise ValueError('سعر الدخول خارج النطاق المحدد؛ لم تُعتمد الصفقة.')
-        if not is_hero(proposal) and quote is not None and quote.bid <= hard_stop_price(entry, rt.settings.tracking.stop_loss_pct):
+        if not is_hero(proposal) and quote is not None and quote.bid <= hard_stop_price(entry, channel_stop_pct(proposal,rt.settings.tracking.stop_loss_pct)):
             raise ValueError('السعر الحالي وصل إلى وقف الخسارة بالنسبة لدخولك؛ لم يبدأ تتبع جديد.')
         async with rt.db.pool.acquire() as conn:
             async with conn.transaction():
