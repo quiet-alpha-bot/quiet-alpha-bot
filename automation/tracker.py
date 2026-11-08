@@ -29,7 +29,7 @@ from typing import Optional
 
 from . import queries as q
 from . import recovery
-from .channel_routing import PRIVATE_CHAT, BOTH_CHATS
+from .channel_routing import PUBLIC_CHAT, PRIVATE_CHAT, BOTH_CHATS
 from .delete_trade import delivery_guard
 from .hero import is_hero, CAPTION as HERO_CAPTION, end_caption as hero_end_caption, end_card as hero_end_card, MANUAL_BLOCK
 from .cards import CardRenderers, Publisher
@@ -312,21 +312,42 @@ class Tracker:
         )
 
     async def send_stop_loss_card(self, trade, private_snapshot=False) -> Optional[int]:
-        """Configured stop-loss card. Sent once and only before SUCCESS."""
-        entry = Decimal(trade["approved_entry"])
-        return await self.publisher.photo_once(
-            "trade",
-            trade["id"],
-            "STOP_LOSS_CARD",
-            lambda: self.renderers.stop_loss_card(entry, trade["current_bid"], trade["option_symbol"]),
-            payload={
-                "entry": str(entry),
-                "observed_bid": str(trade["current_bid"]),
-                "stop_loss_pct": str(Decimal(".35") if private_snapshot else recovery.stop_pct(trade,self.s.tracking.stop_loss_pct)),
-                "private_snapshot": private_snapshot,
-            },
-            chat_id=PRIVATE_CHAT if private_snapshot else None,
-        )
+        """Private stop is text; public stop remains a card, with the same ledger key."""
+        route = trade.get('publication_chat_id')
+        targets = ((PRIVATE_CHAT,) if private_snapshot else
+                   (PUBLIC_CHAT, PRIVATE_CHAT) if route == BOTH_CHATS else (route,))
+        result = None
+        for target in targets:
+            view = recovery.channel_view(trade, target)
+            entry = Decimal(view['approved_entry'])
+            bid = Decimal(view['current_bid'])
+            frozen = target == PRIVATE_CHAT and (private_snapshot or recovery.private_closed(trade))
+            payload = {
+                'entry': str(entry), 'observed_bid': str(bid),
+                'stop_loss_pct': str(Decimal('.35') if target == PRIVATE_CHAT else
+                                     recovery.stop_pct(trade,self.s.tracking.stop_loss_pct)),
+                'private_snapshot': frozen,
+            }
+            # Retain STOP_LOSS_CARD identity: an already delivered stop must not
+            # be resent when changing its presentation or restarting the bot.
+            if target == PRIVATE_CHAT:
+                loss = (entry - bid) * 100
+                text = (
+                    '🦋 <b>QUIET ALPHA — إغلاق متابعة الصفقة</b>\n\n'
+                    f'🔻 <b>{label_for(view)}</b>\n'
+                    f'سعر الدخول: <b>${entry:.2f}</b>\n'
+                    f'سعر الإغلاق المرصود: <b>${bid:.2f}</b>\n'
+                    f'الخسارة المرصودة للعقد: <b>−${loss:.2f}</b>\n\n'
+                    '🛑 <b>تم تفعيل وقف الخسارة وإيقاف متابعة العقد في الخاصة.</b>'
+                )
+                sent = await self.publisher.text_once('trade',view['id'],'STOP_LOSS_CARD',
+                    text,payload=payload,chat_id=target)
+            else:
+                sent = await self.publisher.photo_once('trade',view['id'],'STOP_LOSS_CARD',
+                    lambda: self.renderers.stop_loss_card(entry,bid,view['option_symbol']),
+                    payload=payload,chat_id=target)
+            result = result or sent
+        return result
 
     async def _event_done(self, trade_id: int, event_type: str, level: int) -> bool:
         """Only a SENT event counts as published.
