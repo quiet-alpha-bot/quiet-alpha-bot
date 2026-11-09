@@ -55,6 +55,18 @@ logger = logging.getLogger("quiet-alpha.tracker")
 ORDERED_EVENT_MAX_ATTEMPTS = 1_000_000
 
 
+# Separate marker from legacy recovered_at, which could be armed by a tiny dip.
+ARM_RECOVERY_25 = """UPDATE trades SET recovered_at=$2,
+approval_quote=COALESCE(approval_quote,'{}'::jsonb)||jsonb_build_object('recovery_25_at',$2::timestamptz)
+WHERE id=$1 AND status='TRACKING' AND success_detected_at IS NULL
+AND approval_quote->>'recovery_25_at' IS NULL RETURNING *"""
+PENDING_RECOVERY_25 = """SELECT * FROM trades WHERE status='TRACKING'
+AND approval_quote->>'recovery_25_at' IS NOT NULL ORDER BY id"""
+
+def recovery_armed(trade):
+    return bool((trade.get('approval_quote') or {}).get('recovery_25_at'))
+
+
 def hard_stop_price(entry: Decimal, loss_pct: Decimal) -> Decimal:
     """Stop price before SUCCESS, using the configured loss percentage."""
     return entry * (Decimal("1") - loss_pct)
@@ -473,7 +485,7 @@ class Tracker:
                     "trade", trade_id, "SUCCESS_CARD",
                     lambda: self.renderers.success_card(entry, event.threshold, trade["option_symbol"]),
                     caption=("🦋 تعافى العقد وحقق الهدف ✅\nعاد إلى سعر الدخول، ثم واصل صعوده ليحقق هدف +50$ للعقد."
-                             if trade.get("recovered_at") else None),
+                             if recovery_armed(trade) else None),
                     payload={"observed_bid": str(bid), "threshold": str(event.threshold)},
                     max_attempts=ORDERED_EVENT_MAX_ATTEMPTS,
                 )
@@ -554,7 +566,7 @@ class Tracker:
             await self.send_private_stop(frozen)
         for closed in await self.db.fetch(recovery.PENDING_RECOVERY):
             await self.send_recovery_close(closed)
-        for recovered in await self.db.fetch(recovery.PENDING_RETURN):
+        for recovered in await self.db.fetch(PENDING_RECOVERY_25):
             await self.send_recovery_return(recovered)
         trades = await self.db.fetch(q.TRACKING_TRADES)
         self.last_tick_at = utcnow()
@@ -666,10 +678,10 @@ class Tracker:
 
         gain = self.s.tracking.success_premium_gain
         if (not is_hero(trade) and self.s.flags.breakeven_exit
-            and trade.get('recovered_at') is None and trade['success_detected_at'] is None
-            and trade.get('lowest_bid') is not None and trade['lowest_bid'] < entry
+            and not recovery_armed(trade) and trade['success_detected_at'] is None
+            and trade.get('lowest_bid') is not None and trade['lowest_bid'] <= entry * Decimal('.75')
             and quote.bid is not None and quote.bid >= entry):
-            armed = await self.db.fetchrow(recovery.ARM,trade_id,now)
+            armed = await self.db.fetchrow(ARM_RECOVERY_25,trade_id,now)
             if armed:await self.send_recovery_return(armed)
         # SUCCESS is detected only while SUCCESS_CARD_ENABLED is on, from the
         # current observation only (no backfill from earlier prices).
@@ -693,7 +705,10 @@ class Tracker:
         if quote.bid is not None and latest_trade is not None and not is_hero(latest_trade):
             success_achieved = latest_trade["success_detected_at"] is not None
             if not success_achieved:
-                # Recovery is informational before success; only the channel stop applies.
+                if (self.s.flags.breakeven_exit and recovery_armed(latest_trade)
+                    and quote.bid <= protected_stop_price(entry,Decimal('.20'))):
+                    await self.close(trade_id,'RECOVERY_STOP')
+                    return
                 if (latest_trade.get('publication_chat_id') == BOTH_CHATS
                     and not recovery.private_closed(latest_trade)
                     and quote.bid <= hard_stop_price(entry,Decimal('.35'))):
@@ -717,9 +732,10 @@ class Tracker:
             and latest_trade["success_detected_at"] is None
             and quote.last_tape_time is not None
             and 0 <= (now - quote.last_tape_time).total_seconds() <= 120
-            and breakeven_approach_ready(entry, quote.bid, state.lowest_bid,
-                                        state.highest_bid, gain,
-                                        Decimal("0")) and quote.bid > state.lowest_bid):
+            and quote.bid is not None and state.lowest_bid is not None
+            and state.lowest_bid <= entry * Decimal('.75')
+            and entry * Decimal('.70') <= quote.bid < entry
+            and quote.bid > state.lowest_bid):
             await self.send_breakeven_approach(latest_trade)
 
         # ---- live tracking message ----------------------------------
