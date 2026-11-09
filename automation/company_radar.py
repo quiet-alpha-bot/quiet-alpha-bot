@@ -334,6 +334,8 @@ class CompanyRadar:
             await self.send(row)
 
     async def send(self, row):
-        await self.publisher.text_once('company_radar',row['id'],EVENT,row['message_text'],
-                                       payload=row['payload'],max_attempts=3,
-                                       reply_markup=publication_keyboard('company',row['id']))
+        tracker=getattr(self,'company_tracking',None)
+        if tracker is not None:
+            await tracker.offer(row)
+        # Company radar is never forwarded to the administration channel.
+
