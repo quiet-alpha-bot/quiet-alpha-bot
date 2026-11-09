@@ -693,10 +693,7 @@ class Tracker:
         if quote.bid is not None and latest_trade is not None and not is_hero(latest_trade):
             success_achieved = latest_trade["success_detected_at"] is not None
             if not success_achieved:
-                if (latest_trade.get('recovered_at') is not None
-                    and quote.bid <= protected_stop_price(entry,Decimal('.20'))):
-                    await self.close(trade_id,'RECOVERY_STOP')
-                    return
+                # Recovery is informational before success; only the channel stop applies.
                 if (latest_trade.get('publication_chat_id') == BOTH_CHATS
                     and not recovery.private_closed(latest_trade)
                     and quote.bid <= hard_stop_price(entry,Decimal('.35'))):
