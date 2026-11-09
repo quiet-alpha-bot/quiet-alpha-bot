@@ -460,7 +460,7 @@ class AutomationRuntime:
         lines.append(f"Opening prayer: {'enabled' if prayer_enabled() else 'disabled'} · 15m before NY open (16:15 summer / 17:15 winter Riyadh) · approval stays available")
         lines.append('Daily report: market close + 2m · waits for closed trades')
         lines.append("Stop loss: public 50% · private 35% · independent channels · Hero excluded")
-        lines.append("Recovery: below entry then return · protection entry - $20/contract")
+        lines.append("Recovery: informational only · channel stop until success · protection after success")
         lines.append("Private continuation: +$100 per contract · momentum + flow · private only · one child")
         lines.append("Weekly report: Friday · private only · after daily report and closing greeting")
         lines.append(f"Closing message: {'enabled' if closing_enabled() else 'disabled'} · after channel report · approval stays available")
