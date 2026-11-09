@@ -35,6 +35,8 @@ from .manual_tracking import ManualTracking
 from .manual_exit import ManualExit
 from .contract_support import ContractSupport
 from .company_radar import CompanyRadar
+from .company_tracking import CompanyTracking
+from .company_reports import CompanyReports
 from .opening_prayer import OpeningPrayer, enabled as prayer_enabled
 from .hero import is_hero
 from .weekly_messages import WeeklyMessages
@@ -82,6 +84,8 @@ class AutomationRuntime:
         self.radar = None
         self.contract_support = None
         self.company_radar = None
+        self.company_tracking = None
+        self.company_reports = None
         self.spx_radar = None
         self.opportunities = None
         self.webhook: Optional[WebhookServer] = None
@@ -154,6 +158,9 @@ class AutomationRuntime:
             self.radar = LiquidityRadar(s, self.db, self.publisher, self.liquidity)
             self.contract_support = ContractSupport(s, self.db, self.publisher, self.liquidity)
             self.company_radar = CompanyRadar(s, self.db, self.publisher, self.uw)
+            self.company_tracking = CompanyTracking(s,self.db,self.app.bot,self.uw)
+            self.company_reports = CompanyReports(self.company_tracking)
+            self.company_radar.company_tracking = self.company_tracking
         self.pipeline = SignalPipeline(s, self.db, self.uw, self.publisher, self.liquidity)
         if self.uw is not None:
             self.spx_radar = SPXRadar(s, self.db, self.publisher, self.uw)
@@ -268,6 +275,9 @@ class AutomationRuntime:
                 self._leader_children.append(asyncio.create_task(self.radar.run(), name="qa-radar"))
             if f.liquidity_radar and self.company_radar is not None:
                 self._leader_children.append(asyncio.create_task(self.company_radar.run(), name="qa-company-radar"))
+            if f.tracking and self.company_tracking is not None:
+                self._leader_children.append(asyncio.create_task(self.company_tracking.run(), name="qa-company-tracking"))
+                self._leader_children.append(asyncio.create_task(self.company_reports.run(), name="qa-company-reports"))
             if opportunity_enabled('SPX_RADAR') and self.spx_radar is not None:
                 self._leader_children.append(asyncio.create_task(self.spx_radar.run(), name="qa-spx-unusual"))
             if self.opportunities is not None and (opportunity_enabled('REENTRY') or opportunity_enabled('SPX_RADAR')):
@@ -481,6 +491,15 @@ class AutomationRuntime:
                 lines.append(f"SPX radar check: {self.spx_radar.last_check_at or 'waiting'} · checked {self.spx_radar.scanned} · insufficient history {self.spx_radar.insufficient_history}")
                 if self.spx_radar.last_error:
                     lines.append(f"SPX radar data: {self.spx_radar.last_error}")
+        if self.company_tracking is not None:
+            lines.append("Company channel: -1004471084642 · automatic · text only · no admin copies")
+            lines.append("Company tracking: Ask entry / Bid updates · stop 50% even after target · expiry close · no recovery protection")
+            lines.append("Company reports: daily + Friday weekly · open positions carry forward")
+            company_open=await self.db.fetchval("SELECT count(*) FROM company_positions WHERE status='OPEN'")
+            company_pending=await self.db.fetchval("SELECT count(*) FROM company_positions WHERE status='PENDING'")
+            lines.append(f"Company positions: open {company_open} · pending publication {company_pending}")
+            if self.company_tracking.last_error:
+                lines.append(f"Company tracking last error: {self.company_tracking.last_error}")
         if self.company_radar is not None and self.settings.flags.liquidity_radar:
             monitor = self.company_radar
             lines.append("Company radar: enabled · 10 stocks · all expiries · $1M / 5m · activity >=3x")
