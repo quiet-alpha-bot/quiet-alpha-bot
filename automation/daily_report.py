@@ -36,13 +36,18 @@ def _included(trades):
     return [t for t in trades if t.get("close_reason") not in {"OWNER_EXIT_EXCLUDED", "OWNER_DELETED"}]
 
 
+def _uses_close(trade, success_dollars):
+    return (trade.get("close_reason") in {"BREAKEVEN_EXIT", "OWNER_EXIT_FLAT"}
+            or (trade.get("status") == "CLOSED" and _peak_result(trade) < success_dollars))
+
+
 def _result(trade, success_dollars):
-    peak = _peak_result(trade)
-    reason = trade.get("close_reason")
-    if reason in {"BREAKEVEN_EXIT", "OWNER_EXIT_FLAT", "RECOVERY_STOP"} or (reason == "OWNER_EXIT" and peak < success_dollars):
+    # One contribution per trade: successful peaks, otherwise observed close.
+    if _uses_close(trade, success_dollars):
         if trade["current_bid"] is not None:
             return (Decimal(trade["current_bid"]) - Decimal(trade["approved_entry"])) * 100
-    return peak
+        return Decimal("0")
+    return _peak_result(trade)
 
 
 def summarize_daily_trades(trades: Sequence, success_dollars: Decimal) -> dict:
@@ -52,17 +57,10 @@ def summarize_daily_trades(trades: Sequence, success_dollars: Decimal) -> dict:
     wins = sum(result >= success_dollars and not flat for result, flat in zip(results, neutral))
     losses = len(results) - wins - sum(neutral)
     positive = sum((max(result, Decimal("0")) for result in results), Decimal("0"))
-    # current_bid is frozen when status becomes CLOSED: quote updates only
-    # apply to TRACKING rows. This is an observed price, not a broker fill.
-    closed_results = [
-        (Decimal(t["current_bid"]) - Decimal(t["approved_entry"])) * Decimal("100")
-        for t in trades
-        if t["status"] == "CLOSED" and t["current_bid"] is not None
-    ]
     missing_close_prices = sum(
-        t["status"] == "CLOSED" and t["current_bid"] is None for t in trades
+        _uses_close(t, success_dollars) and t["current_bid"] is None for t in trades
     )
-    negative = sum((min(result, Decimal("0")) for result in closed_results), Decimal("0"))
+    negative = sum((min(result, Decimal("0")) for result in results), Decimal("0"))
     total = positive + negative
     win_rate = (
         Decimal(wins) * Decimal("100") / Decimal(len(results))
@@ -141,7 +139,7 @@ def daily_report_text(
     ]
 
     if trades:
-        lines.extend(["", "<b>تفاصيل الصفقات</b>", "سعر الدخول → أعلى سعر مرصود"])
+        lines.extend(["", "<b>تفاصيل الصفقات</b>", "سعر الدخول → أعلى سعر مرصود للناجحة / سعر الإغلاق لغير الناجحة"])
         for index, (trade, result) in enumerate(
             zip(trades[:detail_limit], summary["results"][:detail_limit]), start=1
         ):
@@ -157,7 +155,7 @@ def daily_report_text(
             )
             lines.append(
                 f"{index}. {'⚖️' if flat else ('✅' if won else '❌')} <code>{escape(label)} | "
-                f"{money(entry)} → {money(trade['current_bid']) if flat or manual_loss else (money(highest) if highest is not None else '—')} "
+                f"{money(entry)} → {(money(trade['current_bid']) if trade['current_bid'] is not None else '—') if _uses_close(trade, success_dollars) else (money(highest) if highest is not None else '—')} "
                 f"| {_signed_usd(result)}</code>"
                 + (" — إغلاق لحماية رأس المال؛ النتيجة بسعر الإغلاق المرصود" if recovery_loss else "")
                 + (" — خروج على رأس المال" if flat else (" — إيقاف بقرار الإدارة؛ السعر المعروض سعر الإغلاق" if manual_loss else ""))
@@ -167,6 +165,7 @@ def daily_report_text(
         if detail_limit is not None and len(trades) > detail_limit:
             lines.append(f"… و{len(trades) - detail_limit} صفقات أخرى")
 
+    lines.append("الأرباح المعروضة مبنية على أعلى سعر مرصود للصفقات الناجحة، وليست أرباح خروج منفّذة.")
     if summary["missing_close_prices"]:
         lines.append(f"⚠️ {summary['missing_close_prices']} صفقة مغلقة بلا سعر إغلاق؛ خسائرها غير مكتملة.")
     payload = {key: str(value) for key, value in summary.items() if key != "results"}
