@@ -3,7 +3,7 @@ import logging
 from decimal import Decimal, InvalidOperation
 from types import SimpleNamespace
 from . import queries as q
-from .hero import is_hero, MANUAL_BLOCK
+from .hero import is_hero
 from .timeutil import utcnow, within_session
 
 logger = logging.getLogger('quiet-alpha.manual-exit')
@@ -11,6 +11,8 @@ OWNER_REASONS = frozenset({'OWNER_EXIT', 'OWNER_EXIT_EXCLUDED', 'OWNER_EXIT_FLAT
 
 
 def exit_reason(trade, bid, gain):
+    if is_hero(trade):
+        return 'OWNER_EXIT'
     entry = Decimal(trade['approved_entry'])
     peak = max(Decimal(trade['highest_bid']) if trade['highest_bid'] is not None else bid, bid)
     succeeded = trade['success_detected_at'] is not None or peak >= entry + gain
@@ -30,7 +32,6 @@ class ManualExit:
         trade = await rt.db.fetchrow(q.GET_TRADE, trade_id)
         if trade is None:
             raise ValueError('لا توجد صفقة بهذا الرقم.')
-        if is_hero(trade):raise ValueError(MANUAL_BLOCK)
         if trade['status'] != 'TRACKING':
             raise ValueError('الصفقة مغلقة بالفعل؛ لم يتغير سعرها أو نتيجتها.')
         now = utcnow()
@@ -46,7 +47,7 @@ class ManualExit:
                                     volume=None, open_interest=None)
         else:
             if rt.uw is None:
-                raise ValueError('مصدر الأسعار غير متاح؛ يمكنك تحديد السعر: /qa_exit 231 2.50')
+                raise ValueError('مصدر الأسعار غير متاح؛ يمكنك تحديد السعر: /E 231 2.50')
             quotes, response = await rt.uw.quotes_for([trade['option_symbol']])
             now = utcnow()
             quote = quotes.get(trade['option_symbol'])
@@ -55,7 +56,7 @@ class ManualExit:
                 or quote.ask is None or not quote.ask.is_finite() or quote.ask < quote.bid
                 or quote.last_tape_time is None
                 or not 0 <= (now - quote.last_tape_time).total_seconds() <= 120):
-                raise ValueError('لا يتوفر سعر حي صالح؛ لإغلاق يدوي بسعر تحددينه: /qa_exit 231 2.50')
+                raise ValueError('لا يتوفر سعر حي صالح؛ لإغلاق يدوي بسعر تحددينه: /E 231 2.50')
         gain = rt.settings.tracking.success_premium_gain
         async with rt.db.pool.acquire() as conn:
             async with conn.transaction():
@@ -82,7 +83,7 @@ class ManualExit:
         if not await rt._guard(update):
             return
         if len(context.args) not in (1, 2) or not context.args[0].isascii() or not context.args[0].isdigit() or not 0 < int(context.args[0]) < 2**63:
-            await update.message.reply_text('الاستخدام: /qa_exit 231\nأو بسعر إغلاق يدوي: /qa_exit 231 2.50\n231 هو رقم الصفقة Trade، وليس رقم المقترح Proposal.')
+            await update.message.reply_text('الاستخدام: /E 231\nأو بسعر إغلاق يدوي: /E 231 2.50\n231 هو رقم الصفقة Trade، وليس رقم المقترح Proposal.')
             return
         try:
             closed = await self.close(int(context.args[0]), context.args[1] if len(context.args)==2 else None)
