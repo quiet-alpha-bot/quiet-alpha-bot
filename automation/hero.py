@@ -23,6 +23,7 @@ def end_caption(trade):
     return (f"🦋 QUIET ALPHA | {LABEL}\nانتهاء المتابعة — أعلى سعر مرصود\n"
             f"{trade['option_symbol']}\nسعر الدخول: {price(trade['approved_entry'])}\n"
             f"أعلى سعر وصل إليه العقد أثناء المتابعة: {price(trade['highest_bid'])}\n"
+            f"أقل سعر وصل إليه العقد أثناء المتابعة: {price(trade.get('lowest_bid'))}\n"
             f"آخر سعر مرصود عند انتهاء المتابعة: {price(trade['current_bid'])}")
 
 
