@@ -691,7 +691,7 @@ def setup_automation(application: Application, renderers: CardRenderers) -> Opti
     application.add_handler(CallbackQueryHandler(runtime.closing_message.callback, pattern=r"^qac:"))
     application.add_handler(CommandHandler(["h", "H"], runtime.manual.hero_command))
     application.add_handler(CommandHandler("qa_track", runtime.manual.command))
-    application.add_handler(CommandHandler("qa_exit", runtime.manual_exit.command))
+    application.add_handler(CommandHandler(["qa_exit", "e", "E"], runtime.manual_exit.command))
     application.add_handler(CallbackQueryHandler(runtime.manual.callback, pattern=r"^qam:"))
     application.add_handler(CommandHandler(["d", "D"], runtime.cmd_delete))
     application.add_handler(CommandHandler("finish", runtime.session_finish.command))
