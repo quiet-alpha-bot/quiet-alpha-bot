@@ -878,9 +878,9 @@ async def start_command(
         "<code>/win 3.90 4.90</code>\n\n"
         "🏆 أعلى سعر:\n"
         "<code>/max 3.90 8.40</code>\n\n"
-        "🛡️ وقف خسارة 35%:\n"
-        "<code>/stop 3.90</code>\n\n"
-        "في أمر /stop اكتبي سعر الدخول فقط."
+        "🛑 إيقاف متابعة صفقة عادية:\n"
+        "<code>/stop 464</code>\n\n"
+        "في أمر /stop اكتبي رقم الصفقة من /qa_status. وللهيرو استخدمي /E مع رقم الصفقة."
     )
 
     await update.message.reply_text(
@@ -1141,75 +1141,32 @@ async def max_command(
 # /stop SPXW 7700 PUT 4.00
 # =========================================================
 
-async def stop_command(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-) -> None:
-
-    if update.message is None:
+async def stop_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Stop an ordinary tracked trade by its ID, without publishing a loose card."""
+    if update.message is None or not await ensure_owner(update):
         return
-
-    if not await ensure_owner(update):
+    if (len(context.args) != 1 or not context.args[0].isascii()
+        or not context.args[0].isdigit() or not 0 < int(context.args[0]) < 2**63):
+        await update.message.reply_text('الاستخدام: /stop رقم_الصفقة\nمثال: /stop 464\nاكتبي رقم الصفقة من /qa_status، وليس سعر الدخول.')
         return
-
-    if len(context.args) not in (1, 4):
-        await update.message.reply_text(
-            "❌ الاستخدام الصحيح:\n\n"
-            "/stop SPXW 7700 PUT 4.00\n\n"
-            "الترتيب: الأصل، الاسترايك، CALL أو PUT، سعر الدخول."
-        )
+    runtime = context.application.bot_data.get('quiet_alpha_runtime')
+    if runtime is None or not runtime.ready:
+        await update.message.reply_text('التتبع غير جاهز؛ لم يتم إيقاف أي صفقة. راجعي /qa_status.')
         return
-
+    from automation import queries as q
+    from automation.hero import is_hero
     try:
-        price_args, contract_name = manual_card_args(context.args, 1)
-        entry_price = format_premium(
-            price_args[0]
-        )
-
-        loss_value = calculate_stop_loss(
-            entry_price=float(entry_price),
-        )
-
-        await publish_stop_loss_card(
-            contract_name=contract_name,
-            context=context,
-            entry_price=entry_price,
-        )
-
-        await update.message.reply_text(
-            "✅ تم إنشاء ونشر بطاقة وقف الخسارة.\n\n"
-            f"🛡️ الوقف: 35%\n"
-            f"🔻 الخسارة: "
-            f"{format_loss(loss_value)}"
-        )
-
-    except (ValueError, TypeError):
-        await update.message.reply_text(
-            "❌ تأكدي من الأصل والاسترايك وCALL أو PUT؛ سعر الدخول "
-            "يجب أن يكون موجبًا.\n\n"
-            "مثال:\n"
-            "/stop SPXW 7700 PUT 4.00"
-        )
-
-    except FileNotFoundError as error:
-        logger.exception(
-            "Stop-loss template was not found"
-        )
-
-        await update.message.reply_text(
-            "❌ لم أجد ملف qa_stop_v2.png.\n"
-            f"{error}"
-        )
-
-    except Exception as error:
-        logger.exception(
-            "Failed to publish stop-loss card"
-        )
-
-        await update.message.reply_text(
-            "❌ تعذر إنشاء بطاقة وقف الخسارة.\n"
-            f"نوع الخطأ: {type(error).__name__}"
-        )
+        trade = await runtime.db.fetchrow(q.GET_TRADE, int(context.args[0]))
+        if trade is None:
+            await update.message.reply_text('لا توجد صفقة بهذا الرقم.')
+            return
+        if is_hero(trade):
+            await update.message.reply_text('هذه صفقة HERO OR ZERO؛ لإيقافها استخدمي /E ' + context.args[0])
+            return
+        await runtime.manual_exit.command(update, context)
+    except Exception:
+        logger.exception('Stop command failed')
+        await update.message.reply_text('تعذر تأكيد الإيقاف؛ راجعي /qa_status قبل إعادة المحاولة.')
 
 
 # =========================================================
