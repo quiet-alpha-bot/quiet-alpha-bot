@@ -40,6 +40,8 @@ class PriceChanged(ValueError):
         super().__init__('تغيّر السعر؛ راجعي السعر الجديد ثم اختاري قناة النشر للتأكيد.')
 
 def manual_keyboard(pid, price):
+    from . import channel_selection
+    if channel_selection.enabled():return channel_selection.keyboard(pid,price=price)
     options = [('🌐 العامة','public'),('🔒 الخاصة','private'),('📣 الاثنتان','both')] if routing.enabled() else [('✅ اعتماد وبدء التتبع','start')]
     return InlineKeyboardMarkup([[
         InlineKeyboardButton(label, callback_data=f'qam:{action}:{pid}:{price:.2f}')
@@ -287,7 +289,7 @@ class ManualTracking:
             _, action, pid = parts[:3]
             displayed_price = parts[3] if len(parts)==4 else None
             pid = int(pid)
-            if action not in ('start', 'cancel', 'public', 'private', 'both', 'reopen'):
+            if action not in ('start', 'cancel', 'public', 'private', 'both', 'execution', 'reopen'):
                 raise ValueError('إجراء غير صالح.')
             await query.answer('جارٍ التحقق…')
             user_id, chat_id = update.effective_user.id, query.message.chat.id
@@ -311,9 +313,15 @@ class ManualTracking:
                 await query.edit_message_text('رُفض العقد اليدوي، ولم تُفتح صفقة. يمكنك إعادة النظر خلال ١٥ دقيقة من الآن.',
                     reply_markup=reconsideration.keyboard(pid,manual=True))
                 return
-            if action in ('public','private','both') and not routing.enabled():
+            from . import channel_selection
+            if (channel_selection.enabled() and action in ('start','public','private','both','execution')
+                    and not getattr(query,'selection_dispatch',False)):
+                await query.edit_message_reply_markup(reply_markup=channel_selection.keyboard(
+                    pid,price=Decimal(displayed_price) if displayed_price else Decimal((await self.rt.db.fetchrow(q.GET_PROPOSAL,pid))['suggested_entry'])))
+                return
+            if action in ('public','private','both','execution') and not routing.enabled():
                 raise ValueError('اختيار القنوات غير مفعّل.')
-            chosen = routing.destination(action) if action in ('public','private','both') else None
+            chosen = routing.destination(action) if action in ('public','private','both','execution') else None
             trade, created = await self.confirm(pid, user_id, chat_id,chosen,displayed_price)
             if trade is None:
                 raise RuntimeError('Approved manual request has no trade')
@@ -330,6 +338,11 @@ class ManualTracking:
                 f"قناة النشر: {routing.channel_name(trade.get('publication_chat_id'))}. "
                 'تابعي حالة التتبع عبر /qa_status.')
         except PriceChanged as error:
+            from .channel_selection import enabled as selection_enabled
+            if selection_enabled():
+                await self.rt.db.execute("""UPDATE proposals SET channel_selection_mask=0,
+                    channel_selection_locked=false WHERE id=$1 AND status='PENDING_APPROVAL'""",
+                    error.proposal['id'])
             await query.edit_message_text(
                 f"🦋 تحديث سعر {'HERO OR ZERO' if is_hero(error.proposal) else 'العقد اليدوي'}\n{error.proposal['option_symbol']}\n"
                 f"السعر الأصلي: ${Decimal(error.proposal['suggested_entry']):.2f}\n"
