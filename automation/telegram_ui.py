@@ -49,6 +49,9 @@ def proposal_keyboard(proposal_id: int, publication_chat_id=None) -> InlineKeybo
                                  callback_data=callback_data(action, proposal_id)),
             InlineKeyboardButton("❌ رفض", callback_data=callback_data(CB_REJECT, proposal_id)),
         ]])
+    from . import channel_selection
+    if channel_selection.enabled():
+        return channel_selection.keyboard(proposal_id)
     if enabled():
         return InlineKeyboardMarkup([[
             InlineKeyboardButton('🌐 العامة',callback_data=callback_data(CB_PUBLIC,proposal_id)),

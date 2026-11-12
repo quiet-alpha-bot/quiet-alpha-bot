@@ -316,6 +316,11 @@ class AutomationRuntime:
     async def _maintenance(self) -> None:
         db = self.db
         assert db is not None and self.publisher is not None
+        from .channel_selection import publish_pending
+        try:
+            await publish_pending(self)
+        except Exception:
+            logger.exception('Simulation channel delivery failed')
         # Signals stored but never processed (e.g. crash right after insert).
         for row in await db.fetch(q.UNPROCESSED_SIGNALS, 20.0):
             await self._schedule_signal(row["id"])
@@ -682,6 +687,9 @@ def setup_automation(application: Application, renderers: CardRenderers) -> Opti
     application.post_init = post_init
     application.post_shutdown = post_shutdown
 
+    from .channel_selection import callback as selection_callback
+    application.add_handler(CallbackQueryHandler(
+        lambda update, context: selection_callback(runtime, update, context), pattern=r"^qs:"))
     application.add_handler(
         CallbackQueryHandler(runtime.approval.on_callback, pattern=r"^qa:")
     )

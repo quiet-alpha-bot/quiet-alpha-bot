@@ -1,0 +1,2 @@
+ALTER TABLE proposals ADD COLUMN IF NOT EXISTS channel_selection_mask INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE proposals ADD COLUMN IF NOT EXISTS channel_selection_locked BOOLEAN NOT NULL DEFAULT false;

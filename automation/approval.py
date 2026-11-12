@@ -88,6 +88,10 @@ class ApprovalHandler:
                 await query.answer('عاد المقترح للمراجعة؛ لم تُفتح صفقة.')
                 await query.edit_message_reply_markup(reply_markup=proposal_keyboard(proposal_id,row.get('publication_chat_id')))
             elif action in (CB_PUBLIC, CB_PRIVATE, CB_BOTH):
+                from . import channel_selection
+                if channel_selection.enabled():
+                    await query.edit_message_reply_markup(reply_markup=channel_selection.keyboard(proposal_id))
+                    await query.answer('حددي القنوات ثم اضغطي إرسال.');return
                 if not routing.enabled():
                     await query.answer('اختيار القنوات غير مفعّل.',show_alert=True)
                     return

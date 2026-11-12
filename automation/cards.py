@@ -251,7 +251,10 @@ class Publisher:
             async def send():
                 card = await asyncio.to_thread(render)
                 try:
-                    return await self.bot.send_photo(chat_id=target,photo=card,**({"caption": caption} if caption else {}),**PHOTO_TIMEOUTS,**reply)
+                    target_caption = caption
+                    if str(target) == '-1003975189482':
+                        target_caption = '🧪 محاكاة فقط — ليست صفقة منفذة' + ('\n'+caption if caption else '')
+                    return await self.bot.send_photo(chat_id=target,photo=card,**({"caption": target_caption} if target_caption else {}),**PHOTO_TIMEOUTS,**reply)
                 finally:
                     card.close()
             sent = await self._deliver(entity_type,entity_id,event,level,
