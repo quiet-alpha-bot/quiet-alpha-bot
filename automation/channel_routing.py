@@ -17,16 +17,12 @@ def enabled():
 
 
 def destination(choice):
-    if choice == 'execution':
-        from .channel_selection import EXECUTION_CHAT
-        return EXECUTION_CHAT
     if choice not in ('public','private','both'):
         raise ValueError('اختاري العامة أو الخاصة أولًا.')
     return BOTH_CHATS if choice == 'both' else PUBLIC_CHAT if choice == 'public' else PRIVATE_CHAT
 
 
 def channel_name(chat_id):
-    if str(chat_id)=='-1003975189482':return 'البوت — محاكاة فقط'
     return 'العامة والخاصة' if chat_id == BOTH_CHATS else 'العامة' if str(chat_id) == PUBLIC_CHAT else 'الخاصة' if str(chat_id) == PRIVATE_CHAT else 'الإدارة'
 
 
@@ -92,6 +88,7 @@ AND EXISTS (
 
 def report_groups(trades):
     """Each actually published copy belongs to its channel; admin retains one trade."""
+    from .channel_scope import deleted
     groups = {}
     for trade in trades:
         if trade.get('close_reason')=='OWNER_DELETED':continue
@@ -99,11 +96,11 @@ def report_groups(trades):
         if chat == BOTH_CHATS:
             for target,mid,timestamp in [(PUBLIC_CHAT,'entry_message_id','published_at'),
                                          (PRIVATE_CHAT,'private_entry_message_id','private_published_at')]:
-                if trade.get(mid) is not None:
+                if trade.get(mid) is not None and not deleted(trade,target):
                     from .recovery import channel_view
                     copy=dict(channel_view(trade,target),publication_chat_id=target,entry_message_id=trade[mid],
                               published_at=trade.get(timestamp))
                     groups.setdefault(target,[]).append(copy)
-        elif chat and trade.get('entry_message_id') is not None:
+        elif chat and trade.get('entry_message_id') is not None and not deleted(trade,chat):
             groups.setdefault(chat,[]).append(trade)
     return groups
