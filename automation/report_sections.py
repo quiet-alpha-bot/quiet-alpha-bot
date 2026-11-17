@@ -23,7 +23,7 @@ def admin_report(trades, day, gain, preview=False):
         parts.append('<b>'+title+'</b>\n'+text)
     # Preserve legacy admin-only trades without assigning them to a public channel.
     assigned={t['id'] for group in groups.values() for t in group}
-    other=[t for t in trades if t['id'] not in assigned]
+    other=[t for t in trades if t['id'] not in assigned and not t.get('publication_chat_id') and t.get('close_reason')!='OWNER_DELETED']
     if other:
         text,_=daily_report_text(other,day,gain,detail_limit=None)
         parts.append('<b>الإدارة / غير منشورة بالقناتين</b>\n'+text)
