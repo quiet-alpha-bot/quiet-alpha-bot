@@ -54,8 +54,6 @@ INSTRUCTIONS = '''🦋 <b>QUIET ALPHA | تعليمات متابعة عقود SPX
 
 • بعد تحقيق هدف <b>+50$ أو أكثر</b>، تستمر المتابعة حتى تفعيل حماية الصفقة أو انتهاء التتبع، مع الاحتفاظ بتصنيفها صفقة ناجحة.
 
-• بلوغ وقف الخاصة يغلق صفقتها؛ وأي عودة لاحقة تكون ببطاقة دخول جديدة بعد موافقة الإدارة، بالخاصة فقط خلال التجربة.
-
 🚫 <b>الدخول المتأخر</b>
 
 لا تتم مطاردة العقود بعد ابتعادها عن سعر الدخول المنشور، لتجنب الدخول بمخاطرة أعلى.
@@ -146,7 +144,11 @@ class WeeklyMessages:
         if row['status'] != 'APPROVED':return
         rt = self.rt
         for event, chat in destinations(row):
-            await rt.publisher.text_once('weekly_message',row['id'],event,row['caption'],chat_id=chat)
+            caption=row['caption']
+            if row['kind']=='INSTRUCTIONS':
+                stop='35%' if str(chat)==routing.PRIVATE_CHAT else '50%'
+                caption=caption.replace('50% للعامة و35% للخاصة من قيمة العقد عند الدخول',stop+' من قيمة العقد عند الدخول')
+            await rt.publisher.text_once('weekly_message',row['id'],event,caption,chat_id=chat)
             state = await rt.db.fetchrow(q.EVENT_STATUS,'weekly_message',row['id'],event,0)
             if not state or state['status'] != 'SENT':return
         # Insert next stage before completing this one, so a restart cannot lose it.
