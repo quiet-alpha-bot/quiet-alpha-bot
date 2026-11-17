@@ -880,7 +880,9 @@ async def start_command(
         "<code>/max 3.90 8.40</code>\n\n"
         "🛑 إيقاف متابعة صفقة عادية:\n"
         "<code>/stop 464</code>\n\n"
-        "في أمر /stop اكتبي رقم الصفقة من /qa_status. وللهيرو استخدمي /E مع رقم الصفقة."
+        "في أمر /stop اكتبي رقم الصفقة من /qa_status. وللهيرو استخدمي /E مع رقم الصفقة.\n\n"
+        "التنفيذ التجريبي: <code>/P</code> إيقاف استقبال الجديد، <code>/R</code> استئنافه.\n"
+        "اكتبي P كبيرة وحدها؛ <code>/p 7500 3.50</code> يبقى لعقد PUT."
     )
 
     await update.message.reply_text(
@@ -921,6 +923,17 @@ async def call_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 
 async def put_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    # Telegram dispatch ignores case; reserve capital /P with no arguments.
+    raw = (getattr(update.message, 'text', '') or '').split()
+    raw = raw[0].split('@')[0] if raw else ''
+    if raw == '/P' and not context.args:
+        runtime = context.application.bot_data.get('quiet_alpha_runtime')
+        if runtime is None:
+            await update.message.reply_text('بوت التنفيذ غير جاهز؛ لم يُغيّر وضع الاستقبال.')
+            return
+        from automation.execution_control import command
+        await command(runtime, update, context, True)
+        return
     await tracked_short_command(update, context, 'PUT')
 
 
