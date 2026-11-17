@@ -334,7 +334,7 @@ class Settings:
         if not Decimal("0") < self.tracking.stop_loss_pct < Decimal("1"):
             issues.append("STOP_LOSS_PCT must be greater than 0 and below 1")
         if self.tracking.protected_stop_buffer < Decimal("0"):
-            issues.append("PROTECTED_STOP_BUFFER must not be negative")
+            issues.append("SUCCESS_PROTECTION_BUFFER must not be negative")
         return issues
 
 
@@ -429,7 +429,7 @@ def load_settings() -> Settings:
         milestone_step_pct=env_int("MILESTONE_STEP_PCT", 10) or 10,
         success_premium_gain=env_decimal("SUCCESS_PREMIUM_GAIN", "0.50"),
         stop_loss_pct=env_decimal("STOP_LOSS_PCT", "0.35"),
-        protected_stop_buffer=env_decimal("PROTECTED_STOP_BUFFER", "0.20"),
+        protected_stop_buffer=env_decimal("SUCCESS_PROTECTION_BUFFER", "0.30"),
         stop_time_et=env_time("TRACKING_STOP_TIME_ET", "16:00"),
         highest_card_trigger=(env_str("HIGHEST_CARD_TRIGGER", "none") or "none").lower(),
         pending_stale_seconds=max(300, env_int("EVENT_PENDING_STALE_SECONDS", 600) or 600),
