@@ -46,7 +46,7 @@ class SessionFinish:
             for label,choice in [('🌐 العامة','public'),('🔒 الخاصة','private'),('📣 الاثنتان','both'),('إلغاء','cancel')]
         ]])
         await update.message.reply_text('اختاري القناة لإنهاء يومها بعد إغلاق صفقاتها وبطاقاتها.\n'
-            'تستمر الفرص بالوصول للإدارة؛ كل قناة تنتظر صفقاتها فقط ثم تستقبل رسالة الاكتفاء والبيان.',reply_markup=markup)
+            'تستمر الفرص بالوصول للإدارة؛ كل قناة تنتظر صفقاتها فقط ثم تستقبل البيان ثم رسالة الاكتفاء.',reply_markup=markup)
 
     async def callback(self,update,context):
         query=update.callback_query
@@ -75,7 +75,7 @@ class SessionFinish:
                     await conn.execute(INSERT,day,choice,query.from_user.id)
             await query.answer('تم الاكتفاء لليوم.')
             await query.edit_message_reply_markup(reply_markup=None)
-            await query.message.reply_text('✅ سُجل طلب الإنهاء للقناة المختارة. ننتظر إغلاق صفقاتها وبطاقاتها، ثم نرسل رسالة الاكتفاء والبيان. '
+            await query.message.reply_text('✅ سُجل طلب الإنهاء للقناة المختارة. ننتظر إغلاق صفقاتها وبطاقاتها، ثم نرسل البيان ثم رسالة الاكتفاء. '
                 'تستمر الفرص بالوصول لك، والقناة الأخرى مستقلة.')
             await self.tick()
         except ValueError as error:
@@ -86,7 +86,8 @@ class SessionFinish:
 
     async def cards_sent(self,trades,chat=None):
         for trade in trades:
-            if trade.get('close_reason')=='OWNER_DELETED':continue
+            from .channel_scope import deleted
+            if trade.get('close_reason')=='OWNER_DELETED' or (chat and deleted(trade,chat)):continue
             if chat == routing.PRIVATE_CHAT:
                 from .recovery import channel_view
                 trade=channel_view(trade,chat)
@@ -136,6 +137,8 @@ class SessionFinish:
             if any(t['status']=='TRACKING' for t in group):continue
             pending=False
             for trade in tracking:
+                from .channel_scope import deleted
+                if deleted(trade,chat):continue
                 if chat==routing.PRIVATE_CHAT and trade.get('private_close'):continue
                 route=trade.get('publication_chat_id')
                 if route not in (chat,'both'):continue
@@ -146,19 +149,6 @@ class SessionFinish:
             # Keep the original route so private copies use their own card ledger.
             ids={t['id'] for t in group}
             if not await self.cards_sent([t for t in trades if t['id'] in ids],chat):continue
-            revision=max(ids,default=0)
-            greeting='FINISH_GREETING_'+str(chat)
-            text,payload=daily_report_text(group,day,rt.settings.tracking.success_premium_gain)
-            text += "\n\nيشمل صفقات اليوم حتى الآن؛ يُحدّث بعد إغلاق أي عقد جديد."
-            # Friday's private experiment keeps daily -> closing -> weekly,
-            # including a manually finished session.
-            report='DAILY_REPORT_'+str(chat)
-            sequence=[(greeting,CAPTION,None),(report,text,payload)]
-            if day.weekday()==4 and chat==routing.PRIVATE_CHAT:
-                sequence.reverse()
-            for event,body,details in sequence:
-                await rt.publisher.text_once('daily',ident,event,body,
-                    payload=details,chat_id=chat,level=revision)
-                state=await rt.db.fetchrow(q.EVENT_STATUS,'daily',ident,event,revision)
-                if not state or state['status']!='SENT':break
+            from .channel_wrapup import send as send_wrapup
+            await send_wrapup(rt,day,chat,group,[t for t in trades if t['id'] in ids],manual=True)
         return True
