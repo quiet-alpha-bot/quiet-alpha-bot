@@ -29,7 +29,7 @@ SKIP="UPDATE private_continuations SET status='SKIPPED',reason=$2 WHERE origin_t
 
 
 def enabled():
-    return os.getenv('PRIVATE_CONTINUATION_ENABLED','true').lower() in ('true','1','yes','on')
+    return False  # Retired by owner; existing child trades remain managed.
 
 
 def parent_eligible(trade,now):
