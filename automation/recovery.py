@@ -18,6 +18,8 @@ AND status='TRACKING' ORDER BY id"""
 
 def stop_pct(trade, fallback=Decimal('.50')):
     route=trade.get('publication_chat_id')
+    from .channel_scope import deleted
+    if route==BOTH_CHATS and deleted(trade,PUBLIC_CHAT):return Decimal('.35')
     if route==PRIVATE_CHAT:return Decimal('.35')
     if route in (PUBLIC_CHAT,BOTH_CHATS):return Decimal('.50')
     return fallback
