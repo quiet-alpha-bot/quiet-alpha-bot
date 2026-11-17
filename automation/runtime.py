@@ -316,11 +316,6 @@ class AutomationRuntime:
     async def _maintenance(self) -> None:
         db = self.db
         assert db is not None and self.publisher is not None
-        from .channel_selection import publish_pending
-        try:
-            await publish_pending(self)
-        except Exception:
-            logger.exception('Simulation channel delivery failed')
         # Signals stored but never processed (e.g. crash right after insert).
         for row in await db.fetch(q.UNPROCESSED_SIGNALS, 20.0):
             await self._schedule_signal(row["id"])
@@ -393,13 +388,14 @@ class AutomationRuntime:
         groups = routing.report_groups(trades)
         if day.weekday()==4 and weekly_report_enabled() and routing.enabled():
             groups.setdefault(routing.PRIVATE_CHAT, [])
+            groups.setdefault(routing.PUBLIC_CHAT, [])
         for chat_id, group in groups.items():
             if chat_id in finished:continue
             if any(t['status'] == 'TRACKING' for t in group):
                 continue
-            text, payload = daily_report_text(group,day,self.settings.tracking.success_premium_gain)
-            await self.publisher.text_once('daily',int(day.strftime('%Y%m%d')),
-                'DAILY_REPORT_'+str(chat_id),text,payload=payload,chat_id=chat_id)
+            from .channel_wrapup import send as send_wrapup
+            ids={t['id'] for t in group}
+            await send_wrapup(self,day,chat_id,group,[t for t in trades if t['id'] in ids])
         if any(trade['status'] == 'TRACKING' for trade in trades):
             return
         text = admin_report(trades, day, self.settings.tracking.success_premium_gain)
@@ -428,6 +424,22 @@ class AutomationRuntime:
             await update.message.reply_text("⚠️ الأتمتة غير جاهزة. راجعي السجل.")
             return False
         return True
+
+    async def cmd_prayer_retry(self, update, context):
+        from .prayer_retry import command
+        await command(self, update, context)
+
+    async def prayer_retry_callback(self, update, context):
+        from .prayer_retry import callback
+        await callback(self, update, context)
+
+    async def cmd_resume_execution(self, update, context):
+        from .execution_control import command
+        await command(self, update, context, False)
+
+    async def delete_callback(self, update, context):
+        from .delete_trade import callback
+        await callback(self, update, context)
 
     async def cmd_delete(self, update, context):
         await delete_trade_command(self, update, context)
@@ -476,9 +488,14 @@ class AutomationRuntime:
         lines.append('Daily report: market close + 2m · waits for closed trades')
         lines.append("Stop loss: public 50% · private 35% · independent channels · Hero excluded")
         lines.append("Recovery: drawdown >=25% then return to entry · protection entry - $20/contract")
-        lines.append("Private continuation: +$100 per contract · momentum + flow · private only · one child")
-        lines.append("Weekly report: Friday · private only · after daily report and closing greeting")
-        lines.append(f"Closing message: {'enabled' if closing_enabled() else 'disabled'} · after channel report · approval stays available")
+        lines.append(f"Successful trade protection: entry - ${self.settings.tracking.protected_stop_buffer*100}/contract")
+        lines.append("Open positions limit: 10 per direction per channel")
+        from .execution_control import GET as GET_EXECUTION_CONTROL
+        execution=await self.db.fetchrow(GET_EXECUTION_CONTROL)
+        lines.append('Execution intake (simulation): '+('paused' if not execution or execution['paused'] else 'enabled')+' · private source · /P pause · /R resume')
+        lines.append("Private continuation: disabled · existing trades continue")
+        lines.append("Weekly report: Friday · public/private · daily → weekly → weekly closing")
+        lines.append("Closing message: automatic · after daily/weekly reports")
         lines.append('Hero or Zero: /H · no stops · tracks until expiry session close')
         lines.append("Weekly messages: Monday 12:00 Riyadh · welcome then instructions · owner approval stays available")
         if self.weekly_messages.last_error:
@@ -687,9 +704,6 @@ def setup_automation(application: Application, renderers: CardRenderers) -> Opti
     application.post_init = post_init
     application.post_shutdown = post_shutdown
 
-    from .channel_selection import callback as selection_callback
-    application.add_handler(CallbackQueryHandler(
-        lambda update, context: selection_callback(runtime, update, context), pattern=r"^qs:"))
     application.add_handler(
         CallbackQueryHandler(runtime.approval.on_callback, pattern=r"^qa:")
     )
@@ -702,6 +716,10 @@ def setup_automation(application: Application, renderers: CardRenderers) -> Opti
     application.add_handler(CommandHandler(["qa_exit", "e", "E"], runtime.manual_exit.command))
     application.add_handler(CallbackQueryHandler(runtime.manual.callback, pattern=r"^qam:"))
     application.add_handler(CommandHandler(["d", "D"], runtime.cmd_delete))
+    application.add_handler(CallbackQueryHandler(runtime.delete_callback, pattern=r"^qdel:"))
+    application.add_handler(CommandHandler("r", runtime.cmd_resume_execution))
+    application.add_handler(CommandHandler("qa_prayer_retry", runtime.cmd_prayer_retry))
+    application.add_handler(CallbackQueryHandler(runtime.prayer_retry_callback,pattern=r"^qpr:"))
     application.add_handler(CommandHandler("finish", runtime.session_finish.command))
     application.add_handler(CallbackQueryHandler(runtime.session_finish.callback, pattern=r"^qaf:"))
     application.add_handler(CommandHandler("qa_status", runtime.cmd_status))
