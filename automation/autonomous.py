@@ -38,6 +38,7 @@ VALUES($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT(event_key) DO NOTHING RETURNING id''
 LINK_TRIGGER = 'UPDATE autonomous_triggers SET signal_db_id=$2 WHERE id=$1'
 REENTRY_TRADES = """SELECT DISTINCT ON(t.option_symbol) t.* FROM trades t
 WHERE t.expiry=$1 AND t.close_reason IS DISTINCT FROM 'OWNER_DELETED'
+AND NOT (t.deleted_channels ? '-1004417588627')
 AND (
  (t.status='CLOSED' AND t.closed_at >= $2 AND (
    (t.close_reason IN ('PROTECTED_STOP','OWNER_EXIT') AND t.success_detected_at IS NOT NULL
@@ -48,7 +49,7 @@ AND NOT EXISTS (SELECT 1 FROM trades newer WHERE newer.option_symbol=t.option_sy
  AND newer.id<>t.id AND newer.publication_chat_id IN ('-1004417588627','both')
  AND newer.approval_time>COALESCE((t.private_close->>'closed_at')::timestamptz,t.closed_at))
 ORDER BY t.option_symbol,COALESCE((t.private_close->>'closed_at')::timestamptz,t.closed_at) DESC,t.id DESC LIMIT 60"""
-PRIVATE_ACTIVE_FILTER = "(publication_chat_id IS DISTINCT FROM '-1004349914430' AND (publication_chat_id IS DISTINCT FROM 'both' OR private_close IS NULL))"
+PRIVATE_ACTIVE_FILTER = "NOT (deleted_channels ? '-1004417588627') AND (publication_chat_id IS DISTINCT FROM '-1004349914430' AND (publication_chat_id IS DISTINCT FROM 'both' OR private_close IS NULL))"
 PRIVATE_STRIKES = "SELECT DISTINCT strike FROM trades WHERE status='TRACKING' AND direction=$1 AND " + PRIVATE_ACTIVE_FILTER
 PRIVATE_STRIKE_EXISTS = "SELECT EXISTS(SELECT 1 FROM trades WHERE status='TRACKING' AND direction=$1 AND strike=$2 AND " + PRIVATE_ACTIVE_FILTER + ")"
 
@@ -58,7 +59,8 @@ def is_reentry(row):
 def reentry_view(trade):
     from .recovery import channel_view
     from .channel_routing import PRIVATE_CHAT
-    if not trade or trade.get('close_reason')=='OWNER_DELETED':return None
+    from .channel_scope import deleted
+    if not trade or trade.get('close_reason')=='OWNER_DELETED' or deleted(trade,PRIVATE_CHAT):return None
     view=channel_view(trade,PRIVATE_CHAT)
     if view.get('status')!='CLOSED':return None
     reason=view.get('close_reason')
