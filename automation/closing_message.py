@@ -49,27 +49,8 @@ class ClosingMessage:
             await asyncio.sleep(15)
 
     async def tick(self):
-        if not enabled():return
-        now=utcnow();day=et_date(now);rt=self.rt
-        if len(await requested_channels(rt.db,day))==2:return
-        if day.weekday()>=5 or now<et_datetime(day,rt.settings.market.close_et):return
-        if rt.settings.owner_user_id is None or not routing.enabled():
-            self.last_error='OWNER_OR_CHANNEL_ROUTING_MISSING';return
-        row=await rt.db.fetchrow(GET_DAY,day)
-        if row is None:
-            if not (await self.report_sent(day,routing.PUBLIC_CHAT) or
-                    await self.report_sent(day,routing.PRIVATE_CHAT)):return
-            await rt.db.execute(INSERT,day,CAPTION,routing.PUBLIC_CHAT,routing.PRIVATE_CHAT,
-                                et_datetime(day+timedelta(days=1),time(0)))
-            row=await rt.db.fetchrow(GET_DAY,day)
-        if row['status']=='PENDING':
-            await rt.publisher.text_once('closing_message',row['id'],'PREVIEW',
-                row['caption']+'\n\nمعاينة الإدارة — اختاري مكان النشر أو تخطي اليوم.\n'
-                'كل قناة تستقبل الختام بعد وصول بيانها اليومي فقط.\n'
-                'تبقى المعاينة متاحة حتى تختاري النشر أو الرفض، وكل وجهة تنتظر بيان يومها.',
-                reply_markup=keyboard(row['id'],'qac'))
-        elif row['status']=='APPROVED':
-            await self.publish(row)
+        # Ordered channel_wrapup is the only automatic closing publisher.
+        return
 
     async def publish(self,row):
         finished=await requested_channels(self.rt.db,row["market_date"])
@@ -98,28 +79,6 @@ class ClosingMessage:
             except Exception:pass
 
     async def _callback(self,query):
-        rt=self.rt
-        if (query.from_user is None or rt.settings.owner_user_id is None or
-            query.from_user.id!=rt.settings.owner_user_id):
-            await query.answer('⛔ غير مصرح',show_alert=True);return
-        if not rt.ready or not enabled() or not routing.enabled():
-            await query.answer('رسالة الختام غير جاهزة حاليًا.',show_alert=True);return
-        if query.message is None or str(query.message.chat.id)!=str(rt.settings.signal_chat_id):
-            await query.answer('استخدمي معاينة قناة الإدارة.',show_alert=True);return
-        try:
-            prefix,action,ident=query.data.split(':');ident=int(ident)
-            if prefix!='qac' or action not in ('public','private','both','skip'):raise ValueError
-        except (ValueError,TypeError):
-            await query.answer('طلب غير صالح.',show_alert=True);return
-        row=await rt.db.fetchrow(GET,ident)
-        if row is None:
-            await query.answer('انتهت مهلة رسالة هذا اليوم.',show_alert=True);return
-        row=await rt.db.fetchrow(DECIDE,ident,'SKIPPED' if action=='skip' else 'APPROVED',
-                                query.from_user.id,utcnow(),'both' if action=='skip' else action)
-        if row is None:
-            await query.answer('تم تسجيل القرار مسبقًا أو انتهت المهلة.',show_alert=True);return
-        await query.answer('تم تخطي اليوم.' if action=='skip' else
-                           'سُجل اختيارك؛ تُرسل الرسالة بعد وصول بيان كل قناة مختارة.')
-        try:await query.edit_message_reply_markup(reply_markup=None)
-        except Exception:log.info('Closing preview buttons unavailable')
-        if action!='skip':await self.publish(row)
+        if query.from_user is None or query.from_user.id!=self.rt.settings.owner_user_id:
+            await query.answer('غير مصرح.',show_alert=True);return
+        await query.answer('أصبح الختام تلقائيًا بعد البيان؛ هذه المعاينة قديمة.',show_alert=True)
