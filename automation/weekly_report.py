@@ -37,18 +37,14 @@ class WeeklyReport:
         if day.weekday()<4:return
         friday=day-timedelta(days=day.weekday()-4)
         if now<et_datetime(friday,rt.settings.market.close_et)+timedelta(minutes=2):return
-        ident=int(friday.strftime('%Y%m%d'));chat=routing.PRIVATE_CHAT
-        if not await rt.db.fetchval(DAILY_SENT,ident,'DAILY_REPORT_'+chat):return
-        closed=await rt.db.fetchval(CLOSING_SENT,friday,chat)
-        if not closed:
-            closed=await rt.db.fetchval(DAILY_SENT,ident,'FINISH_GREETING_'+chat)
-        if not closed:return
-        trades=[]
-        for offset in range(4,-1,-1):
-            rows=await rt.db.fetch(q.DAILY_TRADES,friday-timedelta(days=offset))
-            trades.extend(routing.report_groups(rows).get(chat,[]))
-        if any(t['status']=='TRACKING' for t in trades):return
-        text,payload=weekly_text(trades,friday,rt.settings.tracking.success_premium_gain)
-        if await send_pages(rt,'weekly_report',ident,'PRIVATE_WEEKLY',text,chat,payload):
-            await rt.publisher.text_once('weekly_report',ident,'ADMIN_RESULT',
-                '✅ نُشر البيان الأسبوعي التجريبي في الخاصة بعد البيان اليومي ورسالة الختام.')
+        # Weekday execution is owned by the daily orchestrator. On weekends,
+        # finish any interrupted Friday sequence without crossing channel scope.
+        if day.weekday()==4:return
+        from .session_finish import requested_channels
+        finished=await requested_channels(rt.db,friday)
+        rows=await rt.db.fetch(q.DAILY_TRADES,friday)
+        groups=routing.report_groups(rows)
+        from .channel_wrapup import send as send_wrapup
+        for chat in (routing.PUBLIC_CHAT,routing.PRIVATE_CHAT):
+            group=groups.get(chat,[]);ids={t['id'] for t in group}
+            await send_wrapup(rt,friday,chat,group,[t for t in rows if t['id'] in ids],manual=chat in finished)
