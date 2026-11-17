@@ -645,7 +645,9 @@ class SignalPipeline:
 
     async def _open_strikes(self, direction, signal=None):
         from .autonomous import is_reentry, PRIVATE_STRIKES
-        rows = await self.db.fetch(PRIVATE_STRIKES if is_reentry(signal) else q.OPEN_DIRECTION_STRIKES, direction.value)
+        # Normal proposals have no selected channel yet; enforce scope at approval.
+        if not is_reentry(signal):return set()
+        rows = await self.db.fetch(PRIVATE_STRIKES, direction.value)
         return {Decimal(str(row["strike"])) for row in rows}
 
     async def _store_candidates(self, run_id: int, candidates) -> None:
