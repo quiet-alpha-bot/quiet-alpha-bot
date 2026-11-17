@@ -144,7 +144,8 @@ class Publisher:
         if entity_type == 'trade':
             async with delivery_guard(self.db, entity_id) as conn:
                 trade = await conn.fetchrow(q.GET_TRADE, entity_id)
-                if trade and trade.get('close_reason') == DELETED_REASON:
+                from .channel_scope import deleted
+                if trade and (trade.get('close_reason') == DELETED_REASON or deleted(trade,(payload or {}).get('publication_chat_id'))):
                     return None
                 if (trade and trade.get('private_close') and str((payload or {}).get('publication_chat_id')) == PRIVATE_CHAT
                     and not (event_type == 'STOP_LOSS_CARD_PRIVATE' and (payload or {}).get('private_snapshot'))):
@@ -251,10 +252,7 @@ class Publisher:
             async def send():
                 card = await asyncio.to_thread(render)
                 try:
-                    target_caption = caption
-                    if str(target) == '-1003975189482':
-                        target_caption = '🧪 محاكاة فقط — ليست صفقة منفذة' + ('\n'+caption if caption else '')
-                    return await self.bot.send_photo(chat_id=target,photo=card,**({"caption": target_caption} if target_caption else {}),**PHOTO_TIMEOUTS,**reply)
+                    return await self.bot.send_photo(chat_id=target,photo=card,**({"caption": caption} if caption else {}),**PHOTO_TIMEOUTS,**reply)
                 finally:
                     card.close()
             sent = await self._deliver(entity_type,entity_id,event,level,
