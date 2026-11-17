@@ -19,6 +19,7 @@ delivery cannot be guaranteed across the send/DB crash window.
 """
 
 from __future__ import annotations
+from .channel_scope import deleted as channel_deleted
 
 import asyncio
 import logging
@@ -361,43 +362,27 @@ class Tracker:
             result = result or sent
         return result
 
-    async def _event_done(self, trade_id: int, event_type: str, level: int) -> bool:
-        """Only a SENT event counts as published.
+    def _active_events(self,trade,event):
+        route=(trade or {}).get('publication_chat_id')
+        if route==BOTH_CHATS:
+            names=[]
+            if not channel_deleted(trade,PUBLIC_CHAT):names.append(event)
+            if not channel_deleted(trade,PRIVATE_CHAT) and not recovery.private_closed(trade):names.append(event+'_PRIVATE')
+            return names
+        return [] if channel_deleted(trade,route) else [event]
 
-        FAILED   -> not delivered; stays pending and is retried next poll
-                    (also after a restart). Later events wait.
-        UNCERTAIN-> delivery unknown; never assumed SENT, never resent.
-                    Later events of this trade stay blocked.
-        PENDING  -> in progress (or interrupted); later events wait.
-        NEEDS_RECONCILIATION -> stale PENDING; waits for /qa_reconcile.
-        """
-        row = await self.db.fetchrow(q.EVENT_STATUS, "trade", trade_id, event_type, level)
-        if row is None:
-            return False
-        if row["status"] == "SENT":
-            trade = await self.db.fetchrow(q.GET_TRADE, trade_id)
-            if trade and trade.get('publication_chat_id') == 'both' and not recovery.private_closed(trade):
-                other = await self.db.fetchrow(q.EVENT_STATUS,"trade",trade_id,event_type+'_PRIVATE',level)
-                return bool(other and other['status']=='SENT')
-            return True
-        if row["status"] == "UNCERTAIN":
-            logger.warning("Trade #%s %s %s is UNCERTAIN; later events are blocked",
-                           trade_id, event_type, level)
-        return False
+    async def _event_done(self, trade_id, event_type, level):
+        trade=await self.db.fetchrow(q.GET_TRADE,trade_id)
+        for event in self._active_events(trade,event_type):
+            row=await self.db.fetchrow(q.EVENT_STATUS,'trade',trade_id,event,level)
+            if not row or row['status']!='SENT':return False
+        return True
 
-    async def _milestone_can_advance(self, trade_id: int, level: int) -> bool:
-        """Advance past ambiguous notices without claiming they were delivered.
-
-        The ledger remains UNCERTAIN, so the publisher
-        never resends that notice. Missing, failed and in-flight copies still
-        wait for their own delivery. Success cards retain strict SENT checks.
-        """
-        trade = await self.db.fetchrow(q.GET_TRADE, trade_id)
-        events = ('MILESTONE', 'MILESTONE_PRIVATE') if trade and trade.get('publication_chat_id') == 'both' and not recovery.private_closed(trade) else ('MILESTONE',)
-        for event in events:
-            row = await self.db.fetchrow(q.EVENT_STATUS, 'trade', trade_id, event, level)
-            if not row or row['status'] not in ('SENT', 'UNCERTAIN'):
-                return False
+    async def _milestone_can_advance(self, trade_id, level):
+        trade=await self.db.fetchrow(q.GET_TRADE,trade_id)
+        for event in self._active_events(trade,'MILESTONE'):
+            row=await self.db.fetchrow(q.EVENT_STATUS,'trade',trade_id,event,level)
+            if not row or row['status'] not in ('SENT','UNCERTAIN'):return False
         return True
 
     async def flush_events(self, trade_id: int) -> bool:
@@ -711,6 +696,7 @@ class Tracker:
                     return
                 if (latest_trade.get('publication_chat_id') == BOTH_CHATS
                     and not recovery.private_closed(latest_trade)
+                    and not channel_deleted(latest_trade,PUBLIC_CHAT)
                     and quote.bid <= hard_stop_price(entry,Decimal('.35'))):
                     await self.freeze_private(latest_trade,now)
                 pct = recovery.stop_pct(latest_trade,self.s.tracking.stop_loss_pct)
