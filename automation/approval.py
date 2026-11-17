@@ -88,10 +88,6 @@ class ApprovalHandler:
                 await query.answer('عاد المقترح للمراجعة؛ لم تُفتح صفقة.')
                 await query.edit_message_reply_markup(reply_markup=proposal_keyboard(proposal_id,row.get('publication_chat_id')))
             elif action in (CB_PUBLIC, CB_PRIVATE, CB_BOTH):
-                from . import channel_selection
-                if channel_selection.enabled():
-                    await query.edit_message_reply_markup(reply_markup=channel_selection.keyboard(proposal_id))
-                    await query.answer('حددي القنوات ثم اضغطي إرسال.');return
                 if not routing.enabled():
                     await query.answer('اختيار القنوات غير مفعّل.',show_alert=True)
                     return
@@ -328,19 +324,15 @@ class ApprovalHandler:
                         await conn.execute(q.REVERT_APPROVAL,proposal['id'])
                         return
                 session_finished = await stopped(conn)
-                active_count = await conn.fetchval(
-                    q.COUNT_TRACKING_DIRECTION, proposal["direction"]
-                )
-                strike_busy = await conn.fetchval(
-                    PRIVATE_STRIKE_EXISTS if private_reentry else q.OPEN_DIRECTION_STRIKE_EXISTS,
-                    proposal["direction"], proposal["strike"],
-                )
+                from .channel_scope import capacity
+                active_count, strike_busy = await capacity(conn, proposal['direction'],
+                    proposal['strike'], proposal.get('publication_chat_id'))
                 if session_finished:
                     await conn.execute(q.REVERT_APPROVAL, proposal["id"])
                 elif strike_busy:
                     # Revert while still holding the same direction lock.
                     await conn.execute(q.REVERT_APPROVAL, proposal["id"])
-                elif active_count >= 6:
+                elif active_count >= 10:
                     limit_hit = True
                 else:
                     finalized = await conn.fetchval(
@@ -380,7 +372,7 @@ class ApprovalHandler:
         if limit_hit:
             await rt.db.execute(q.REVERT_APPROVAL, proposal["id"])
             await rt.publisher.text(
-                f"⚠️ يوجد بالفعل 6 صفقات {proposal['direction']} مفتوحة.\n"
+                f"⚠️ يوجد بالفعل 10 صفقات {proposal['direction']} مفتوحة في إحدى القنوات المختارة.\n"
                 "لم تُغلق أي صفقة، والاقتراح بقي مفتوحًا للمراجعة."
             )
             return
