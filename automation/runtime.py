@@ -632,15 +632,36 @@ class AutomationRuntime:
         if to_et(now).weekday() >= 5 or not within_session(now, self.settings.market.open_et, self.settings.market.close_et):
             await update.message.reply_text("المعاينة الحية متاحة أثناء جلسة السوق فقط؛ لا نعرض جلسة قديمة كقراءة اليوم.")
             return
-        opened = et_datetime(et_date(now), self.settings.market.open_et)
-        end = now.replace(second=0, microsecond=0)
-        start = max(opened, end - timedelta(hours=1))
-        snapshot = await self.liquidity.radar_snapshot(start, end)
-        observed_at = utcnow()
-        if not snapshot.fresh(observed_at, max_age=180):
-            await update.message.reply_text("بانتظار تدفقات مكتملة وحديثة. " + (snapshot.reason or "NO_FRESH_DATA"))
+        task = getattr(self, "_radar_preview_task", None)
+        if task is not None and not task.done():
+            await update.message.reply_text("فحص الرادار جارٍ؛ سأرسل النتيجة عند اكتماله.")
             return
-        await update.message.reply_html(radar_text(snapshot, observed_at, start == opened))
+        await update.message.reply_text("جاري فحص الرادار؛ بقية الأوامر متاحة أثناء الفحص.")
+        self._radar_preview_task = self._spawn(self._radar_preview(update), "qa-radar-preview")
+
+    async def _radar_preview(self, update):
+        try:
+            now = utcnow()
+            opened = et_datetime(et_date(now), self.settings.market.open_et)
+            end = now.replace(second=0, microsecond=0)
+            start = max(opened, end - timedelta(hours=1))
+            snapshot = await asyncio.wait_for(self.liquidity.radar_snapshot(start, end), timeout=90)
+            observed_at = utcnow()
+            if not snapshot.fresh(observed_at, max_age=180):
+                await update.message.reply_text("بانتظار تدفقات مكتملة وحديثة. " + (snapshot.reason or "NO_FRESH_DATA"))
+                return
+            await update.message.reply_html(radar_text(snapshot, observed_at, start == opened))
+        except asyncio.TimeoutError:
+            try:
+                await update.message.reply_text("تأخر مصدر بيانات الرادار. انتهى هذا الفحص؛ يمكن إعادة طلبه، وبقية الأوامر تعمل.")
+            except Exception:
+                logger.warning("Could not deliver radar preview timeout")
+        except Exception:
+            logger.exception("Radar preview failed")
+            try:
+                await update.message.reply_text("تعذر إكمال فحص الرادار الآن؛ يمكنك إعادة طلبه لاحقًا.")
+            except Exception:
+                logger.warning("Could not deliver radar preview error")
 
     async def cmd_highest(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not await self._guard(update):

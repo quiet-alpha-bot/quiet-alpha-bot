@@ -126,7 +126,7 @@ class CompanyTracking:
             await self.publisher.text_once('company_position',row['id'],'LIVE',text,max_attempts=1000000)
             event=await self.db.fetchrow(q.EVENT_STATUS,'company_position',row['id'],'LIVE',0)
             if event and event['status']=='SENT' and event.get('message_id'):
-                if await self.publisher.edit(event['message_id'],text):
+                if await self.publisher.edit(event['message_id'],text,background=True):
                     await self.db.execute('UPDATE company_positions SET live_bid=$2 WHERE id=$1',row['id'],row['current_bid'])
 
     async def tick(self):

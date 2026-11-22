@@ -75,6 +75,8 @@ class UWClient:
         self.error_count = 0
         self.rate_limited_count = 0
         self._chain_ticker: Optional[str] = None
+        self._request_slots = asyncio.Semaphore(4)
+        self._blocked_until = 0.0
 
     def __repr__(self) -> str:
         return "UWClient(<redacted>)"
@@ -106,7 +108,12 @@ class UWClient:
         for attempt in range(attempts):
             started = time.monotonic()
             try:
-                response = await self._client.get(path, params=params)
+                async with self._request_slots:
+                    # All scanners share the provider's cooldown. Fail fast instead
+                    # of letting hundreds of queued requests hammer a limited key.
+                    if time.monotonic() < self._blocked_until:
+                        raise UWError("rate_limited", "provider cooldown", 429)
+                    response = await self._client.get(path, params=params)
             except httpx.TimeoutException:
                 last_error = UWError("timeout", f"{path} timed out")
             except httpx.HTTPError as error:
@@ -122,14 +129,10 @@ class UWClient:
                 if response.status_code == 429:
                     self.rate_limited_count += 1
                     last_error = UWError("rate_limited", path, 429)
-                    if attempt + 1 < attempts:
-                        await asyncio.sleep(
-                            _reset_delay(
-                                response.headers.get("x-uw-req-per-minute-reset"),
-                                attempt,
-                            )
-                        )
-                    continue
+                    delay = _reset_delay(response.headers.get("x-uw-req-per-minute-reset"), attempt)
+                    self._blocked_until = max(self._blocked_until, time.monotonic() + delay + 1)
+                    self.error_count += 1
+                    raise last_error
                 if response.status_code in (401, 403):
                     self.error_count += 1
                     raise UWError("auth", f"{path} -> {response.status_code}",

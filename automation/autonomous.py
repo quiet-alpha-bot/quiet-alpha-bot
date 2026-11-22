@@ -17,6 +17,7 @@ from .company_radar import (CompanyRadar, DataIssue, LATEST, INSERT, company_tex
 from .entry import within_tolerance
 from .liquidity import eligible_flow
 from .models import Direction, parse_ts
+from .uw_client import UWError
 from .occ import parse_occ
 from .selection import select_with_flow
 from .timeutil import utcnow, et_date, et_datetime, within_session
@@ -165,6 +166,13 @@ class SPXRadar(CompanyRadar):
                     self.insufficient_history+=1
                 else:
                     self.last_error=str(error)
+            except UWError as error:
+                self.last_error = "SPX_UW_" + error.kind.upper()
+                log.warning("SPX radar contract %s unavailable: %s", symbol, error.kind)
+                # A broken contract must not starve the rest of the scan.
+                # An account-wide limit/auth error, however, stops this cycle.
+                if error.kind in ("rate_limited", "auth"):
+                    return
 
     async def send(self,row):
         await self.publisher.text_once('spx_radar',row['id'],'SPX_UNUSUAL_FLOW',

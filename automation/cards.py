@@ -25,6 +25,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import json
+import time
+from collections import OrderedDict
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
@@ -93,6 +95,17 @@ class Publisher:
         self.bot = bot
         self.chat_id = chat_id
         self.db = db
+        self._telegram_retry_at = 0.0
+        self._edit_next = 0.0
+        self._edit_pending = OrderedDict()
+        self._edit_sent = {}
+
+    def _defer_telegram(self, error):
+        delay = error.retry_after
+        if hasattr(delay, "total_seconds"):
+            delay = delay.total_seconds()
+        self._telegram_retry_at = max(self._telegram_retry_at,
+                                      time.monotonic() + float(delay) + 1)
 
     async def publication_ready(self, entity_type, entity_id, event_type, target, entry_event="ENTRY_CARD"):
         if entity_type != 'trade' or str(target) == str(self.chat_id) or event_type == 'ENTRY_CARD':
@@ -161,6 +174,9 @@ class Publisher:
 
     async def _deliver_unlocked(self, entity_type, entity_id, event_type, level,
                                 payload, send, max_attempts, ledger=None):
+        # Do not consume ledger attempts while Telegram has asked us to wait.
+        if time.monotonic() < self._telegram_retry_at:
+            return None
         ledger = ledger if ledger is not None else self.db
         event_id = await ledger.claim_event(
             entity_type, entity_id, event_type, level, payload, max_attempts
@@ -170,6 +186,7 @@ class Publisher:
         try:
             message = await send()
         except RetryAfter as error:
+            self._defer_telegram(error)
             await ledger.mark_event(event_id, "FAILED", None, f"RetryAfter {error.retry_after}")
             logger.warning("%s/%s %s: rate limited by Telegram", entity_type, entity_id, event_type)
             return None
@@ -262,6 +279,8 @@ class Publisher:
 
     async def text(self, text: str, reply_markup: Optional[InlineKeyboardMarkup] = None) -> Optional[int]:
         """Non-ledgered informational message (status/errors). Best effort."""
+        if time.monotonic() < self._telegram_retry_at:
+            return None
         try:
             message = await self.bot.send_message(
                 chat_id=self.chat_id,
@@ -270,33 +289,62 @@ class Publisher:
                 reply_markup=reply_markup,
             )
             return message.message_id
+        except RetryAfter as error:
+            self._defer_telegram(error)
+            return None
         except Exception as error:
             logger.warning("Status message failed: %s", type(error).__name__)
             return None
 
     async def edit(
-        self,
-        message_id: int,
-        text: str,
+        self, message_id: int, text: str,
         reply_markup: Optional[InlineKeyboardMarkup] = None,
+        *, background: bool = False,
     ) -> bool:
+        now = time.monotonic()
+        payload = (text, reply_markup)
+        if self._edit_sent.get(message_id) == payload:
+            self._edit_pending.pop(message_id, None)
+            return True
+        if background:
+            # Fair rotation; keep only a marker, never queue stale message text.
+            self._edit_pending[message_id] = now
+            for key, seen in list(self._edit_pending.items()):
+                if now - seen > 120:
+                    self._edit_pending.pop(key, None)
+            while len(self._edit_pending) > 2000:
+                self._edit_pending.popitem(last=False)
+        if now < self._telegram_retry_at:
+            return False
+        if background and (now < self._edit_next or
+                           next(iter(self._edit_pending), None) != message_id):
+            return False
+        self._edit_pending.pop(message_id, None)
+        self._edit_next = now + 4  # Cosmetic updates must leave room for commands.
         try:
             await self.bot.edit_message_text(
-                chat_id=self.chat_id,
-                message_id=message_id,
-                text=text,
-                parse_mode=ParseMode.HTML,
-                reply_markup=reply_markup,
+                chat_id=self.chat_id, message_id=message_id, text=text,
+                parse_mode=ParseMode.HTML, reply_markup=reply_markup,
             )
-            return True
         except BadRequest as error:
-            if "not modified" in str(error).lower():
-                return True
-            logger.warning("Edit failed for message %s: %s", message_id, error)
+            if "not modified" not in str(error).lower():
+                logger.warning("Edit failed for message %s: %s", message_id, error)
+                return False
+        except RetryAfter as error:
+            self._defer_telegram(error)
+            logger.warning("Telegram edits paused for requested cooldown")
+            return False
+        except (TimedOut, NetworkError) as error:
+            self._edit_next = time.monotonic() + 30
+            logger.warning("Edit connection unavailable: %s", type(error).__name__)
             return False
         except Exception as error:
             logger.warning("Edit failed for message %s: %s", message_id, type(error).__name__)
             return False
+        if len(self._edit_sent) >= 2000:
+            self._edit_sent.pop(next(iter(self._edit_sent)))
+        self._edit_sent[message_id] = payload
+        return True
 
     async def alert_uncertain(
         self, entity_type: str, entity_id: int, event_type: str, level: int

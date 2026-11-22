@@ -175,7 +175,8 @@ class Tracker:
         if trade is None or trade.get("close_reason") == "OWNER_DELETED" or trade.get("publication_chat_id") or trade["tracking_message_id"] is None:
             return
         ok = await self.publisher.edit(
-            trade["tracking_message_id"], self.render(trade, closed_reason, stale_note)
+            trade["tracking_message_id"], self.render(trade, closed_reason, stale_note),
+            background=closed_reason is None
         )
         if ok:
             await self.db.execute(q.TOUCH_TRACKING_MESSAGE, trade_id)
