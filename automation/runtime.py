@@ -433,6 +433,14 @@ class AutomationRuntime:
         from .prayer_retry import callback
         await callback(self, update, context)
 
+    async def cmd_execution_exit(self, update, context):
+        from .execution_exit import command
+        await command(self, update, context)
+
+    async def execution_exit_callback(self, update, context):
+        from .execution_exit import callback
+        await callback(self, update, context)
+
     async def cmd_resume_execution(self, update, context):
         from .execution_control import command
         await command(self, update, context, False)
@@ -718,6 +726,8 @@ def setup_automation(application: Application, renderers: CardRenderers) -> Opti
     application.add_handler(CommandHandler(["d", "D"], runtime.cmd_delete))
     application.add_handler(CallbackQueryHandler(runtime.delete_callback, pattern=r"^qdel:"))
     application.add_handler(CommandHandler("r", runtime.cmd_resume_execution))
+    application.add_handler(CommandHandler("x", runtime.cmd_execution_exit))
+    application.add_handler(CallbackQueryHandler(runtime.execution_exit_callback, pattern=r"^qex:"))
     application.add_handler(CommandHandler("qa_prayer_retry", runtime.cmd_prayer_retry))
     application.add_handler(CallbackQueryHandler(runtime.prayer_retry_callback,pattern=r"^qpr:"))
     application.add_handler(CommandHandler("finish", runtime.session_finish.command))
