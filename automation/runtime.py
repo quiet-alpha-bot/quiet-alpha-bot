@@ -425,6 +425,18 @@ class AutomationRuntime:
             return False
         return True
 
+    async def cmd_continue_recovery(self, update, context):
+        from .recovery import continue_command
+        await continue_command(self, update, context)
+
+    async def cmd_radar_stop(self, update, context):
+        from .radar_session import stop_command
+        await stop_command(self, update, context)
+
+    async def radar_session_callback(self, update, context):
+        from .radar_session import callback
+        await callback(self, update, context)
+
     async def cmd_prayer_retry(self, update, context):
         from .prayer_retry import command
         await command(self, update, context)
@@ -495,7 +507,7 @@ class AutomationRuntime:
         lines.append(f"Opening prayer: {'enabled' if prayer_enabled() else 'disabled'} · 15m before NY open (16:15 summer / 17:15 winter Riyadh) · approval stays available")
         lines.append('Daily report: market close + 2m · waits for closed trades')
         lines.append("Stop loss: public 50% · private 35% · independent channels · Hero excluded")
-        lines.append("Recovery: drawdown >=25% then return to entry · protection entry - $20/contract")
+        lines.append("Recovery: drawdown >=25% then entry + $0.10 alert · return protection after rising above · /C owner private override")
         lines.append(f"Successful trade protection: entry - ${self.settings.tracking.protected_stop_buffer*100}/contract")
         lines.append("Open positions limit: 10 per direction per channel")
         from .execution_control import GET as GET_EXECUTION_CONTROL
@@ -753,6 +765,9 @@ def setup_automation(application: Application, renderers: CardRenderers) -> Opti
     application.add_handler(CallbackQueryHandler(runtime.prayer_retry_callback,pattern=r"^qpr:"))
     application.add_handler(CommandHandler("finish", runtime.session_finish.command))
     application.add_handler(CallbackQueryHandler(runtime.session_finish.callback, pattern=r"^qaf:"))
+    application.add_handler(CommandHandler("c", runtime.cmd_continue_recovery))
+    application.add_handler(CommandHandler("rs", runtime.cmd_radar_stop))
+    application.add_handler(CallbackQueryHandler(runtime.radar_session_callback, pattern=r"^qrs:"))
     application.add_handler(CommandHandler("qa_status", runtime.cmd_status))
     application.add_handler(CommandHandler("qa_channels", runtime.cmd_channels))
     application.add_handler(CommandHandler("qa_close", runtime.cmd_close))

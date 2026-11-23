@@ -10,6 +10,7 @@ from zoneinfo import ZoneInfo
 
 from .radar_publication import keyboard as publication_keyboard
 from . import queries as q
+from . import radar_session
 from .models import money
 from .occ import strike_text
 from .timeutil import et_date, et_datetime, to_et, utcnow
@@ -140,9 +141,14 @@ class LiquidityRadar:
         if scheduled is None:
             return
         day, slot, due, opened = scheduled
+        await radar_session.offer(self, day)
         ident = int(day.strftime("%Y%m%d"))
         event = await self.db.fetchrow(q.EVENT_STATUS, "radar", ident, "LIQUIDITY_RADAR", slot)
         if event and event["status"] not in ("FAILED",):
+            if event['status'] == 'SENT' and slot < 100:
+                saved = await self.db.fetchrow(q.GET_RADAR_REPORT, day, slot)
+                if saved:
+                    await radar_session.publish(self, day, slot, saved['message_text'])
             return
         saved = await self.db.fetchrow(q.GET_RADAR_REPORT, day, slot)
         if saved is None:
@@ -166,4 +172,7 @@ class LiquidityRadar:
                                        payload={"scope": "SPXW_0DTE", "slot": slot},
                                        max_attempts=1000000,
                                        reply_markup=publication_keyboard('market',ident,slot))
+        confirmed = await self.db.fetchrow(q.EVENT_STATUS, "radar", ident, "LIQUIDITY_RADAR", slot)
+        if confirmed and confirmed['status'] == 'SENT':
+            await radar_session.publish(self, day, slot, text)
         self.last_error = None

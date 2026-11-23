@@ -58,14 +58,20 @@ ORDERED_EVENT_MAX_ATTEMPTS = 1_000_000
 
 # Separate marker from legacy recovered_at, which could be armed by a tiny dip.
 ARM_RECOVERY_25 = """UPDATE trades SET recovered_at=$2,
-approval_quote=COALESCE(approval_quote,'{}'::jsonb)||jsonb_build_object('recovery_25_at',$2::timestamptz)
+approval_quote=COALESCE(approval_quote,'{}'::jsonb)||jsonb_build_object(
+'recovery_profit_at',$2::timestamptz,'recovery_profit_bid',$3::numeric)
 WHERE id=$1 AND status='TRACKING' AND success_detected_at IS NULL
-AND approval_quote->>'recovery_25_at' IS NULL RETURNING *"""
+AND approval_quote->>'recovery_profit_at' IS NULL RETURNING *"""
 PENDING_RECOVERY_25 = """SELECT * FROM trades WHERE status='TRACKING'
-AND approval_quote->>'recovery_25_at' IS NOT NULL ORDER BY id"""
+AND approval_quote->>'recovery_profit_at' IS NOT NULL ORDER BY id"""
+ABOVE_RECOVERY = """UPDATE trades SET approval_quote=approval_quote||
+jsonb_build_object('recovery_profit_above',true)
+WHERE id=$1 AND status='TRACKING' AND approval_quote->>'recovery_profit_at' IS NOT NULL
+AND (approval_quote->>'recovery_profit_at')::timestamptz < $2
+AND $3::numeric > approved_entry + 0.10 RETURNING *"""
 
 def recovery_armed(trade):
-    return bool((trade.get('approval_quote') or {}).get('recovery_25_at'))
+    return recovery.profit_armed(trade)
 
 
 def hard_stop_price(entry: Decimal, loss_pct: Decimal) -> Decimal:
@@ -185,7 +191,11 @@ class Tracker:
         current = await self.db.fetchrow(q.GET_TRADE, trade_id)
         if is_hero(current) and reason != 'SESSION_END':
             raise ValueError(MANUAL_BLOCK)
-        closed = await self.db.fetchrow(q.CLOSE_TRADE, trade_id, reason)
+        close_sql = q.CLOSE_TRADE
+        if reason == 'RECOVERY_STOP':
+            # Serialize against /C: if it won the row update, do not close.
+            close_sql = close_sql.replace("AND status = 'TRACKING'", "AND status = 'TRACKING' AND COALESCE(approval_quote->>'recovery_continue','false') != 'true'")
+        closed = await self.db.fetchrow(close_sql, trade_id, reason)
         if closed is None:
             return None
         logger.info("Trade #%s closed (%s)", trade_id, reason)
@@ -666,8 +676,8 @@ class Tracker:
         if (not is_hero(trade) and self.s.flags.breakeven_exit
             and not recovery_armed(trade) and trade['success_detected_at'] is None
             and trade.get('lowest_bid') is not None and trade['lowest_bid'] <= entry * Decimal('.75')
-            and quote.bid is not None and quote.bid >= entry):
-            armed = await self.db.fetchrow(ARM_RECOVERY_25,trade_id,now)
+            and quote.bid is not None and quote.bid >= recovery.profit_level(trade)):
+            armed = await self.db.fetchrow(ARM_RECOVERY_25,trade_id,now,quote.bid)
             if armed:await self.send_recovery_return(armed)
         # SUCCESS is detected only while SUCCESS_CARD_ENABLED is on, from the
         # current observation only (no backfill from earlier prices).
@@ -689,10 +699,14 @@ class Tracker:
         # snapshot from before this quote was processed.
         latest_trade = await self.db.fetchrow(q.GET_TRADE, trade_id)
         if quote.bid is not None and latest_trade is not None and not is_hero(latest_trade):
+            if recovery_armed(latest_trade) and quote.bid > recovery.profit_level(latest_trade):
+                above = await self.db.fetchrow(ABOVE_RECOVERY, trade_id, now, quote.bid)
+                if above is not None:
+                    latest_trade = above
             success_achieved = latest_trade["success_detected_at"] is not None
             if not success_achieved:
                 if (self.s.flags.breakeven_exit and recovery_armed(latest_trade)
-                    and quote.bid <= protected_stop_price(entry,Decimal('.20'))):
+                    and recovery.profit_exit(latest_trade, quote.bid)):
                     await self.close(trade_id,'RECOVERY_STOP')
                     return
                 if (latest_trade.get('publication_chat_id') == BOTH_CHATS

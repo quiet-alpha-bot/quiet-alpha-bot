@@ -47,16 +47,60 @@ def channel_view(trade, target):
             copy[key]=value
     return copy
 
+def profit_level(trade):
+    return Decimal(trade['approved_entry']) + Decimal('.10')
+
+
+def profit_armed(trade):
+    return bool((trade.get('approval_quote') or {}).get('recovery_profit_at'))
+
+
+def profit_exit(trade, bid):
+    meta = trade.get('approval_quote') or {}
+    return (profit_armed(trade) and bool(meta.get('recovery_profit_above'))
+            and not meta.get('recovery_continue') and bid <= profit_level(trade))
+
+
+CONTINUE = """UPDATE trades SET approval_quote=COALESCE(approval_quote,'{}'::jsonb)
+||jsonb_build_object('recovery_continue',true), updated_at=now()
+WHERE id=$1 AND status='TRACKING'
+AND coalesce(approval_quote->>'trade_mode','NORMAL') != 'HERO_OR_ZERO'
+RETURNING id"""
+
+
+async def continue_command(runtime, update, context):
+    # Keep both the command and acknowledgement out of every channel.
+    owner = runtime.settings.owner_user_id
+    if (not update.effective_user or update.effective_user.id != owner
+            or not update.effective_chat or str(update.effective_chat.id) != str(owner)):
+        return
+    if not await runtime._guard(update):
+        return
+    if len(context.args) != 1 or not context.args[0].isdigit() or not 0 < int(context.args[0]) < 2**63:
+        await update.message.reply_text('اكتبي /C ثم رقم الصفقة، مثل /C 636.')
+        return
+    row = await runtime.db.fetchrow(CONTINUE, int(context.args[0]))
+    await update.message.reply_text(
+        f"✅ تم تطبيق الأمر على الصفقة #{row['id']}." if row
+        else 'لا توجد صفقة مفتوحة مناسبة بهذا الرقم؛ الأمر لا يعيد فتح صفقة مغلقة.')
+
+
 def recovered_text(trade):
+    meta = trade.get('approval_quote') or {}
+    bid = Decimal(str(meta.get('recovery_profit_bid', trade['current_bid'])))
     return ('🦋 <b>QUIET ALPHA — تعافي العقد</b>\n\n'
-            f"<b>{trade['option_symbol']}</b>\n"
-            'عاد العقد إلى سعر الدخول؛ تستمر متابعة حركته ورصد مستجداته.')
+            f"<b>{trade['option_symbol']}</b>\n\n"
+            f"سعر الدخول: <b>${Decimal(trade['approved_entry']):.2f}</b>\n"
+            f"السعر المرصود: <b>${bid:.2f}</b>\n\n"
+            'عاد العقد فوق سعر الدخول؛ تستمر متابعة حركته ورصد مستجداته.\n\n'
+            '🔔 <b>تابعوا حركة العقد عن قرب، وانتبهوا لأي تراجع بعد التعافي.</b>')
+
 
 def close_text(trade):
     entry=Decimal(trade['approved_entry']);bid=Decimal(trade['current_bid'])
-    return ('🦋 <b>إغلاق متابعة العقد لحماية رأس المال</b>\n\n'
-        f"<b>{trade['option_symbol']}</b>\n"
-        f"سعر الدخول: ${entry:.2f}\nأعلى سعر مرصود: ${Decimal(trade['highest_bid']):.2f}\n"
-        f"أقل سعر مرصود: ${Decimal(trade['lowest_bid']):.2f}\n"
-        f"سعر الإغلاق المرصود: ${bid:.2f}\nنتيجة العقد المرصودة: {(bid-entry)*100:+.2f}$\n\n"
-        'تم إغلاق متابعة العقد للحد من الخسارة وحماية رأس المال.')
+    return ('🦋 <b>QUIET ALPHA — إغلاق متابعة العقد</b>\n\n'
+        f"<b>{trade['option_symbol']}</b>\n\n"
+        f"سعر الدخول: <b>${entry:.2f}</b>\n"
+        f"سعر الإغلاق المرصود: <b>${bid:.2f}</b>\n"
+        f"نتيجة العقد المرصودة قبل الرسوم: <b>{(bid-entry)*100:+.2f}$</b>\n\n"
+        'أُغلقت متابعة العقد بعد تراجع السعر من أعلى مستوى سجّله عقب التعافي.')
