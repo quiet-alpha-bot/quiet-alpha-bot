@@ -919,6 +919,14 @@ async def tracked_short_command(update, context, direction: str) -> None:
 
 
 async def call_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    # Preserve CALL strike/price entry; uppercase /C with one ID is recovery override.
+    raw = (getattr(update.message, 'text', '') or '').split()
+    raw = raw[0].split('@')[0] if raw else ''
+    if raw == '/C' and len(context.args) != 2:
+        runtime = context.application.bot_data.get('quiet_alpha_runtime')
+        if runtime is not None:
+            await runtime.cmd_continue_recovery(update, context)
+        return
     await tracked_short_command(update, context, 'CALL')
 
 
